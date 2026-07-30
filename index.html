@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>XIAO IMU Recorder</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --accent:#38bdf8; --ok:#22c55e; --err:#ef4444; --text:#e2e8f0; --muted:#94a3b8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background:var(--bg); color:var(--text); padding:12px; }
+  h1 { font-size:1.2rem; margin:0 0 10px; }
+  .card { background:var(--card); border-radius:12px; padding:12px; margin-bottom:12px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; }
+  button { flex:1 1 auto; min-width:110px; padding:12px; border:none; border-radius:10px;
+           font-size:1rem; font-weight:600; color:white; cursor:pointer; }
+  .btn-connect { background:#2563eb; }
+  .btn-start   { background:var(--ok); }
+  .btn-stop    { background:#f59e0b; }
+  .btn-reset   { background:#64748b; }
+  .btn-dl      { background:#8b5cf6; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .status { font-size:.9rem; color:var(--muted); margin-top:6px; }
+  .status b { color:var(--text); }
+  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; font-size:.85rem; }
+  .stats div { background:#0b1220; padding:8px; border-radius:8px; text-align:center; }
+  .stats span { display:block; font-size:1.1rem; font-weight:700; color:var(--accent); }
+  table { width:100%; border-collapse:collapse; font-size:.75rem; font-family: ui-monospace, monospace; }
+  th, td { padding:4px 6px; border-bottom:1px solid #334155; text-align:right; white-space:nowrap; }
+  th { position:sticky; top:0; background:var(--card); color:var(--accent); }
+  .table-wrap { max-height:260px; overflow:auto; border-radius:8px; background:#0b1220; }
+  .err { color:var(--err); }
+  .ok  { color:var(--ok); }
+</style>
+</head>
+<body>
+
+<h1>🛰️ XIAO nRF52840 IMU Recorder</h1>
+
+<div class="card">
+  <div class="row">
+    <button id="btnConnect" class="btn-connect">Connect</button>
+    <button id="btnStart"   class="btn-start"   disabled>Start Recording</button>
+    <button id="btnStop"    class="btn-stop"    disabled>Stop Recording</button>
+  </div>
+  <div class="row" style="margin-top:8px;">
+    <button id="btnReset" class="btn-reset">Reset Data</button>
+    <button id="btnDl"    class="btn-dl">Download CSV</button>
+  </div>
+  <div class="status" id="status">Status: <b class="err">Disconnected</b></div>
+</div>
+
+<div class="card">
+  <div class="stats">
+    <div>Samples<span id="stSamples">0</span></div>
+    <div>Rate (Hz)<span id="stRate">0</span></div>
+    <div>Batches<span id="stBatches">0</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>#</th><th>Epoch (ms)</th><th>Time (local)</th>
+            <th>ax(g)</th><th>ay</th><th>az</th>
+            <th>gx(dps)</th><th>gy</th><th>gz</th></tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------
+ * UUIDs must match the Arduino sketch
+ * ----------------------------------------------------------------*/
+const SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+const IMU_UUID     = '19b10001-e8f2-537e-4f6c-d104768a1214';
+const CTRL_UUID    = '19b10002-e8f2-537e-4f6c-d104768a1214';
+const TIME_UUID    = '19b10003-e8f2-537e-4f6c-d104768a1214';
+
+let device=null, server=null, imuChar=null, ctrlChar=null, timeChar=null;
+let samples = [];          // {epochMs, ax,ay,az, gx,gy,gz}
+let batchCount = 0;
+let recording = false;
+let rateStart = 0, rateSamples = 0;
+
+const $ = id => document.getElementById(id);
+const setStatus = (html) => $('status').innerHTML = 'Status: ' + html;
+
+/* ---------------- Connect ---------------- */
+$('btnConnect').onclick = async () => {
+  try {
+    if (!navigator.bluetooth) throw new Error('Web Bluetooth not supported in this browser.');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'XIAO-IMU' }],
+      optionalServices: [SERVICE_UUID]
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+    setStatus('<span class="ok">Connecting…</span>');
+    server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE_UUID);
+    imuChar  = await svc.getCharacteristic(IMU_UUID);
+    ctrlChar = await svc.getCharacteristic(CTRL_UUID);
+    timeChar = await svc.getCharacteristic(TIME_UUID);
+    await imuChar.startNotifications();
+    imuChar.addEventListener('characteristicvaluechanged', onImuData);
+    $('btnConnect').disabled = true;
+    $('btnStart').disabled   = false;
+    setStatus('<span class="ok">Connected to ' + device.name + '</span>');
+  } catch (e) {
+    setStatus('<span class="err">Error: ' + e.message + '</span>');
+  }
+};
+
+function onDisconnect() {
+  setStatus('<span class="err">Disconnected</span>');
+  $('btnConnect').disabled = false;
+  $('btnStart').disabled = $('btnStop').disabled = true;
+  recording = false;
+}
+
+/* ---------------- Start / Stop ---------------- */
+$('btnStart').onclick = async () => {
+  try {
+    // Sync epoch seconds to device
+    const epochSec = Math.floor(Date.now() / 1000);
+    const buf = new ArrayBuffer(4);
+    new DataView(buf).setUint32(0, epochSec, false); // big-endian
+    await timeChar.writeValue(buf);
+
+    // Send START command
+    await ctrlChar.writeValue(new Uint8Array([1]));
+
+    recording = true;
+    rateStart = Date.now(); rateSamples = 0;
+    $('btnStart').disabled = true;
+    $('btnStop').disabled  = false;
+    setStatus('<span class="ok">Recording…</span>');
+  } catch (e) { setStatus('<span class="err">' + e.message + '</span>'); }
+};
+
+$('btnStop').onclick = async () => {
+  try {
+    await ctrlChar.writeValue(new Uint8Array([0]));
+    recording = false;
+    $('btnStart').disabled = false;
+    $('btnStop').disabled  = true;
+    setStatus('<span class="ok">Stopped</span>');
+  } catch (e) { setStatus('<span class="err">' + e.message + '</span>'); }
+};
+
+/* ---------------- IMU data handler ----------------
