@@ -1,154 +1,331 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>XIAO IMU Recorder</title>
-<style>
-  :root { --bg:#0f172a; --card:#1e293b; --accent:#38bdf8; --ok:#22c55e; --err:#ef4444; --text:#e2e8f0; --muted:#94a3b8; }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-         background:var(--bg); color:var(--text); padding:12px; }
-  h1 { font-size:1.2rem; margin:0 0 10px; }
-  .card { background:var(--card); border-radius:12px; padding:12px; margin-bottom:12px; }
-  .row { display:flex; flex-wrap:wrap; gap:8px; }
-  button { flex:1 1 auto; min-width:110px; padding:12px; border:none; border-radius:10px;
-           font-size:1rem; font-weight:600; color:white; cursor:pointer; }
-  .btn-connect { background:#2563eb; }
-  .btn-start   { background:var(--ok); }
-  .btn-stop    { background:#f59e0b; }
-  .btn-reset   { background:#64748b; }
-  .btn-dl      { background:#8b5cf6; }
-  button:disabled { opacity:.4; cursor:not-allowed; }
-  .status { font-size:.9rem; color:var(--muted); margin-top:6px; }
-  .status b { color:var(--text); }
-  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; font-size:.85rem; }
-  .stats div { background:#0b1220; padding:8px; border-radius:8px; text-align:center; }
-  .stats span { display:block; font-size:1.1rem; font-weight:700; color:var(--accent); }
-  table { width:100%; border-collapse:collapse; font-size:.75rem; font-family: ui-monospace, monospace; }
-  th, td { padding:4px 6px; border-bottom:1px solid #334155; text-align:right; white-space:nowrap; }
-  th { position:sticky; top:0; background:var(--card); color:var(--accent); }
-  .table-wrap { max-height:260px; overflow:auto; border-radius:8px; background:#0b1220; }
-  .err { color:var(--err); }
-  .ok  { color:var(--ok); }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XIAO IMU Recorder</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+    body { margin: 0; background: #0b1220; color: #e5edf8; }
+    main { max-width: 900px; margin: auto; padding: 28px 18px 60px; }
+    h1 { margin-bottom: 6px; font-size: clamp(1.7rem, 5vw, 2.6rem); }
+    .muted { color: #96a6bc; }
+    .panel { background: #111c2f; border: 1px solid #24344e; border-radius: 14px; padding: 18px; margin-top: 18px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+    button { border: 0; border-radius: 9px; padding: 11px 16px; font-weight: 700; cursor: pointer; background: #2f81f7; color: white; }
+    button.secondary { background: #263750; }
+    button.danger { background: #d24a4a; }
+    button:disabled { opacity: .42; cursor: not-allowed; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 16px; }
+    .metric { background: #0c1627; padding: 12px; border-radius: 10px; }
+    .metric span { display: block; color: #91a1b8; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
+    .metric strong { display: block; margin-top: 5px; font-size: 1.15rem; overflow-wrap: anywhere; }
+    .ok { color: #61d69e; } .warn { color: #ffc857; } .bad { color: #ff7474; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: .82rem; }
+    th, td { text-align: right; padding: 7px 6px; border-bottom: 1px solid #27364b; white-space: nowrap; }
+    th:first-child, td:first-child { text-align: left; }
+    .table-wrap { overflow-x: auto; }
+    code { color: #b8d7ff; }
+  </style>
 </head>
 <body>
+<main>
+  <h1>XIAO IMU Recorder</h1>
+  <div class="muted">200 Hz accelerometer + gyroscope capture over Web Bluetooth</div>
 
-<h1>🛰️ XIAO nRF52840 IMU Recorder</h1>
+  <section class="panel">
+    <div class="buttons">
+      <button id="connect">Connect</button>
+      <button id="start" disabled>Start recording</button>
+      <button id="stop" class="danger" disabled>Stop recording</button>
+      <button id="refresh" class="secondary" disabled>Refresh status</button>
+      <button id="download" class="secondary" disabled>Download CSV</button>
+      <button id="clear" class="secondary" disabled>Clear data</button>
+    </div>
+    <div class="grid">
+      <div class="metric"><span>Connection</span><strong id="connection">Disconnected</strong></div>
+      <div class="metric"><span>Recorder</span><strong id="state">Idle</strong></div>
+      <div class="metric"><span>Samples received</span><strong id="samples">0</strong></div>
+      <div class="metric"><span>Effective rate</span><strong id="rate">0 Hz</strong></div>
+      <div class="metric"><span>Board buffer</span><strong id="buffered">0</strong></div>
+      <div class="metric"><span>Missing / dropped</span><strong id="dropped">0</strong></div>
+    </div>
+    <p id="message" class="muted">Use Chrome or Edge and connect to “XIAO IMU 200Hz”.</p>
+  </section>
 
-<div class="card">
-  <div class="row">
-    <button id="btnConnect" class="btn-connect">Connect</button>
-    <button id="btnStart"   class="btn-start"   disabled>Start Recording</button>
-    <button id="btnStop"    class="btn-stop"    disabled>Stop Recording</button>
-  </div>
-  <div class="row" style="margin-top:8px;">
-    <button id="btnReset" class="btn-reset">Reset Data</button>
-    <button id="btnDl"    class="btn-dl">Download CSV</button>
-  </div>
-  <div class="status" id="status">Status: <b class="err">Disconnected</b></div>
-</div>
+  <section class="panel">
+    <h2>Latest samples</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Unix ms</th><th>ax (g)</th><th>ay (g)</th><th>az (g)</th><th>gx (°/s)</th><th>gy (°/s)</th><th>gz (°/s)</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="7" class="muted">No data yet</td></tr></tbody>
+      </table>
+    </div>
+  </section>
 
-<div class="card">
-  <div class="stats">
-    <div>Samples<span id="stSamples">0</span></div>
-    <div>Rate (Hz)<span id="stRate">0</span></div>
-    <div>Batches<span id="stBatches">0</span></div>
-  </div>
-</div>
-
-<div class="card">
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr><th>#</th><th>Epoch (ms)</th><th>Time (local)</th>
-            <th>ax(g)</th><th>ay</th><th>az</th>
-            <th>gx(dps)</th><th>gy</th><th>gz</th></tr>
-      </thead>
-      <tbody id="tbody"></tbody>
-    </table>
-  </div>
-</div>
+  <section class="panel muted">
+    Web Bluetooth requires a secure context. On a PC, serve this folder with
+    <code>python -m http.server 8000</code> and open <code>http://localhost:8000</code>.
+    For Android, host this file on HTTPS and open it in Chrome. iOS browsers do not
+    provide native Web Bluetooth support.
+  </section>
+</main>
 
 <script>
-/* ------------------------------------------------------------------
- * UUIDs must match the Arduino sketch
- * ----------------------------------------------------------------*/
-const SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
-const IMU_UUID     = '19b10001-e8f2-537e-4f6c-d104768a1214';
-const CTRL_UUID    = '19b10002-e8f2-537e-4f6c-d104768a1214';
-const TIME_UUID    = '19b10003-e8f2-537e-4f6c-d104768a1214';
+'use strict';
 
-let device=null, server=null, imuChar=null, ctrlChar=null, timeChar=null;
-let samples = [];          // {epochMs, ax,ay,az, gx,gy,gz}
-let batchCount = 0;
+const SERVICE_UUID = '91bad492-b950-4226-aa2b-4ede9fa42f59';
+const DATA_UUID = 'cba1d466-344c-4be3-ab3f-189f80dd7518';
+const CONTROL_UUID = 'cba1d466-344c-4be3-ab3f-189f80dd7519';
+const STATUS_UUID = 'cba1d466-344c-4be3-ab3f-189f80dd7520';
+const SAMPLE_PERIOD_MS = 5;
+const ACCEL_G_PER_LSB = 0.000122;  // LSM6DS3 at +/-4 g
+const GYRO_DPS_PER_LSB = 0.0175;   // LSM6DS3 at +/-500 dps
+
+let device, server, dataChar, controlChar, statusChar;
 let recording = false;
-let rateStart = 0, rateSamples = 0;
+let stopping = false;
+let startEpochMs = 0;
+let samples = [];
+let latest = [];
+let missingFromSequence = 0;
+let boardDropped = 0;
+let expectedSampleSequence = null;
+let firstArrivalTime = 0;
+let lastArrivalTime = 0;
 
 const $ = id => document.getElementById(id);
-const setStatus = (html) => $('status').innerHTML = 'Status: ' + html;
+const connectButton = $('connect');
+const startButton = $('start');
+const stopButton = $('stop');
+const refreshButton = $('refresh');
+const downloadButton = $('download');
+const clearButton = $('clear');
 
-/* ---------------- Connect ---------------- */
-$('btnConnect').onclick = async () => {
-  try {
-    if (!navigator.bluetooth) throw new Error('Web Bluetooth not supported in this browser.');
-    device = await navigator.bluetooth.requestDevice({
-      filters: [{ name: 'XIAO-IMU' }],
-      optionalServices: [SERVICE_UUID]
-    });
-    device.addEventListener('gattserverdisconnected', onDisconnect);
-    setStatus('<span class="ok">Connecting…</span>');
-    server = await device.gatt.connect();
-    const svc = await server.getPrimaryService(SERVICE_UUID);
-    imuChar  = await svc.getCharacteristic(IMU_UUID);
-    ctrlChar = await svc.getCharacteristic(CTRL_UUID);
-    timeChar = await svc.getCharacteristic(TIME_UUID);
-    await imuChar.startNotifications();
-    imuChar.addEventListener('characteristicvaluechanged', onImuData);
-    $('btnConnect').disabled = true;
-    $('btnStart').disabled   = false;
-    setStatus('<span class="ok">Connected to ' + device.name + '</span>');
-  } catch (e) {
-    setStatus('<span class="err">Error: ' + e.message + '</span>');
-  }
-};
-
-function onDisconnect() {
-  setStatus('<span class="err">Disconnected</span>');
-  $('btnConnect').disabled = false;
-  $('btnStart').disabled = $('btnStop').disabled = true;
-  recording = false;
+function setMessage(text, kind = 'muted') {
+  $('message').className = kind;
+  $('message').textContent = text;
 }
 
-/* ---------------- Start / Stop ---------------- */
-$('btnStart').onclick = async () => {
+function setConnected(connected) {
+  $('connection').textContent = connected ? device?.name || 'Connected' : 'Disconnected';
+  $('connection').className = connected ? 'ok' : 'bad';
+  connectButton.textContent = connected ? 'Disconnect' : 'Connect';
+  startButton.disabled = !connected || recording || stopping;
+  stopButton.disabled = !connected || !recording;
+  refreshButton.disabled = !connected;
+  downloadButton.disabled = samples.length === 0;
+  clearButton.disabled = samples.length === 0 || recording || stopping;
+}
+
+function updateStats() {
+  $('samples').textContent = samples.length.toLocaleString();
+  $('dropped').textContent = Math.max(boardDropped, missingFromSequence).toLocaleString();
+  if (samples.length > 1 && lastArrivalTime > firstArrivalTime) {
+    const hz = (samples.length - 1) * 1000 / (lastArrivalTime - firstArrivalTime);
+    $('rate').textContent = `${hz.toFixed(1)} Hz`;
+  }
+  downloadButton.disabled = samples.length === 0;
+  clearButton.disabled = samples.length === 0 || recording || stopping;
+}
+
+function renderLatest() {
+  if (!latest.length) {
+    $('rows').innerHTML = '<tr><td colspan="7" class="muted">No data yet</td></tr>';
+    return;
+  }
+  $('rows').innerHTML = latest.slice(-10).reverse().map(s =>
+    `<tr><td>${s.t.toFixed(3)}</td><td>${s.ax.toFixed(5)}</td>` +
+    `<td>${s.ay.toFixed(5)}</td><td>${s.az.toFixed(5)}</td>` +
+    `<td>${s.gx.toFixed(4)}</td><td>${s.gy.toFixed(4)}</td><td>${s.gz.toFixed(4)}</td></tr>`
+  ).join('');
+}
+
+function clearData() {
+  samples = [];
+  latest = [];
+  expectedSampleSequence = null;
+  missingFromSequence = 0;
+  boardDropped = 0;
+  firstArrivalTime = lastArrivalTime = 0;
+  $('buffered').textContent = '0';
+  $('rate').textContent = '0 Hz';
+  renderLatest();
+  updateStats();
+}
+
+async function writeCommand(bytes) {
+  // The response form is more widely implemented than write-without-response.
+  if (controlChar.writeValueWithResponse) await controlChar.writeValueWithResponse(bytes);
+  else await controlChar.writeValue(bytes);
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    throw new Error('Web Bluetooth is unavailable. Use current Chrome/Edge in a secure context.');
+  }
+  device = await navigator.bluetooth.requestDevice({
+    filters: [{ services: [SERVICE_UUID] }]
+  });
+  device.addEventListener('gattserverdisconnected', onDisconnected);
+  server = await device.gatt.connect();
+  const service = await server.getPrimaryService(SERVICE_UUID);
+  [dataChar, controlChar, statusChar] = await Promise.all([
+    service.getCharacteristic(DATA_UUID),
+    service.getCharacteristic(CONTROL_UUID),
+    service.getCharacteristic(STATUS_UUID)
+  ]);
+  dataChar.addEventListener('characteristicvaluechanged', onData);
+  statusChar.addEventListener('characteristicvaluechanged', onStatus);
+  await dataChar.startNotifications();
+  await statusChar.startNotifications();
+  setConnected(true);
+  setMessage('Connected. Ready to record.', 'ok');
+  await writeCommand(Uint8Array.of(0x03));
+}
+
+function onDisconnected() {
+  recording = false;
+  stopping = false;
+  server = dataChar = controlChar = statusChar = null;
+  $('state').textContent = 'Idle';
+  setConnected(false);
+  setMessage('Bluetooth disconnected. Data already received remains available.', 'warn');
+}
+
+async function toggleConnection() {
   try {
-    // Sync epoch seconds to device
-    const epochSec = Math.floor(Date.now() / 1000);
-    const buf = new ArrayBuffer(4);
-    new DataView(buf).setUint32(0, epochSec, false); // big-endian
-    await timeChar.writeValue(buf);
+    if (device?.gatt?.connected) {
+      device.gatt.disconnect();
+    } else {
+      await connect();
+    }
+  } catch (error) {
+    setMessage(error.message || String(error), 'bad');
+    setConnected(false);
+  }
+}
 
-    // Send START command
-    await ctrlChar.writeValue(new Uint8Array([1]));
-
+async function startRecording() {
+  try {
+    clearData();
+    startEpochMs = Date.now();
+    const command = new ArrayBuffer(9);
+    const view = new DataView(command);
+    view.setUint8(0, 0x01);
+    view.setBigUint64(1, BigInt(startEpochMs), true);
+    await writeCommand(command);
     recording = true;
-    rateStart = Date.now(); rateSamples = 0;
-    $('btnStart').disabled = true;
-    $('btnStop').disabled  = false;
-    setStatus('<span class="ok">Recording…</span>');
-  } catch (e) { setStatus('<span class="err">' + e.message + '</span>'); }
-};
+    stopping = false;
+    firstArrivalTime = lastArrivalTime = performance.now();
+    $('state').textContent = 'Recording';
+    $('state').className = 'bad';
+    startButton.disabled = true;
+    stopButton.disabled = false;
+    clearButton.disabled = true;
+    setMessage(`Recording started at Unix epoch ${startEpochMs} ms.`, 'ok');
+  } catch (error) {
+    setMessage(`Could not start: ${error.message || error}`, 'bad');
+  }
+}
 
-$('btnStop').onclick = async () => {
+async function stopRecording() {
   try {
-    await ctrlChar.writeValue(new Uint8Array([0]));
     recording = false;
-    $('btnStart').disabled = false;
-    $('btnStop').disabled  = true;
-    setStatus('<span class="ok">Stopped</span>');
-  } catch (e) { setStatus('<span class="err">' + e.message + '</span>'); }
-};
+    stopping = true;
+    stopButton.disabled = true;
+    $('state').textContent = 'Flushing';
+    $('state').className = 'warn';
+    setMessage('Stopping; waiting for the board buffer to flush…', 'warn');
+    await writeCommand(Uint8Array.of(0x02));
+  } catch (error) {
+    stopping = false;
+    setMessage(`Could not stop: ${error.message || error}`, 'bad');
+    setConnected(Boolean(device?.gatt?.connected));
+  }
+}
 
-/* ---------------- IMU data handler ----------------
+function onData(event) {
+  const view = event.target.value;
+  if (view.byteLength < 16 || view.getUint8(0) !== 0xA1) return;
+  const count = view.getUint8(1);
+  const firstSequence = view.getUint32(4, true);
+  const firstEpochUs = view.getBigUint64(8, true);
+  if (view.byteLength !== 16 + count * 12) {
+    setMessage(`Rejected malformed ${view.byteLength}-byte data packet.`, 'bad');
+    return;
+  }
+
+  if (expectedSampleSequence !== null && firstSequence > expectedSampleSequence) {
+    missingFromSequence += firstSequence - expectedSampleSequence;
+  }
+  // Duplicate/replayed packets are ignored, while a gap remains visible.
+  let skip = expectedSampleSequence !== null && firstSequence < expectedSampleSequence
+    ? Math.min(count, expectedSampleSequence - firstSequence) : 0;
+
+  for (let i = skip; i < count; i++) {
+    const o = 16 + i * 12;
+    const sequence = firstSequence + i;
+    const sample = {
+      t: Number(firstEpochUs + BigInt(i * 5000)) / 1000,
+      gx: view.getInt16(o + 0, true) * GYRO_DPS_PER_LSB,
+      gy: view.getInt16(o + 2, true) * GYRO_DPS_PER_LSB,
+      gz: view.getInt16(o + 4, true) * GYRO_DPS_PER_LSB,
+      ax: view.getInt16(o + 6, true) * ACCEL_G_PER_LSB,
+      ay: view.getInt16(o + 8, true) * ACCEL_G_PER_LSB,
+      az: view.getInt16(o + 10, true) * ACCEL_G_PER_LSB
+    };
+    samples.push(sample);
+    latest.push(sample);
+  }
+  if (latest.length > 10) latest.splice(0, latest.length - 10);
+  expectedSampleSequence = Math.max(expectedSampleSequence ?? 0, firstSequence + count);
+  lastArrivalTime = performance.now();
+  renderLatest();
+  updateStats();
+}
+
+function onStatus(event) {
+  const view = event.target.value;
+  if (view.byteLength < 14 || view.getUint8(0) !== 0x53 || view.getUint8(1) !== 0x54) return;
+  const state = view.getUint8(3);
+  const buffered = view.getUint16(4, true);
+  boardDropped = view.getUint32(6, true);
+  $('buffered').textContent = buffered.toLocaleString();
+  $('state').textContent = ['Idle', 'Recording', 'Flushing'][state] || `Unknown (${state})`;
+  $('state').className = state === 1 ? 'bad' : state === 2 ? 'warn' : 'ok';
+
+  if (state === 0 && stopping) {
+    stopping = false;
+    recording = false;
+    setMessage(`Recording complete: ${samples.length.toLocaleString()} samples ready.`, 'ok');
+    setConnected(true);
+  }
+  updateStats();
+}
+
+function downloadCsv() {
+  if (!samples.length) return;
+  const lines = ['unix_epoch_ms,iso_utc,accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps'];
+  for (const s of samples) {
+    lines.push(`${s.t.toFixed(3)},${new Date(s.t).toISOString()},${s.ax.toFixed(6)},${s.ay.toFixed(6)},${s.az.toFixed(6)},${s.gx.toFixed(5)},${s.gy.toFixed(5)},${s.gz.toFixed(5)}`);
+  }
+  const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `xiao_imu_${new Date(startEpochMs).toISOString().replaceAll(':', '-')}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+connectButton.addEventListener('click', toggleConnection);
+startButton.addEventListener('click', startRecording);
+stopButton.addEventListener('click', stopRecording);
+refreshButton.addEventListener('click', () => writeCommand(Uint8Array.of(0x03)).catch(e => setMessage(e.message, 'bad')));
+downloadButton.addEventListener('click', downloadCsv);
+clearButton.addEventListener('click', clearData);
+setConnected(false);
+</script>
+</body>
+</html>
