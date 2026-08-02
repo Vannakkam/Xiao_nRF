@@ -1,331 +1,519 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>XIAO IMU Recorder</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>IMU BLE Recorder</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
-    body { margin: 0; background: #0b1220; color: #e5edf8; }
-    main { max-width: 900px; margin: auto; padding: 28px 18px 60px; }
-    h1 { margin-bottom: 6px; font-size: clamp(1.7rem, 5vw, 2.6rem); }
-    .muted { color: #96a6bc; }
-    .panel { background: #111c2f; border: 1px solid #24344e; border-radius: 14px; padding: 18px; margin-top: 18px; }
-    .buttons { display: flex; flex-wrap: wrap; gap: 10px; }
-    button { border: 0; border-radius: 9px; padding: 11px 16px; font-weight: 700; cursor: pointer; background: #2f81f7; color: white; }
-    button.secondary { background: #263750; }
-    button.danger { background: #d24a4a; }
-    button:disabled { opacity: .42; cursor: not-allowed; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 16px; }
-    .metric { background: #0c1627; padding: 12px; border-radius: 10px; }
-    .metric span { display: block; color: #91a1b8; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
-    .metric strong { display: block; margin-top: 5px; font-size: 1.15rem; overflow-wrap: anywhere; }
-    .ok { color: #61d69e; } .warn { color: #ffc857; } .bad { color: #ff7474; }
-    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: .82rem; }
-    th, td { text-align: right; padding: 7px 6px; border-bottom: 1px solid #27364b; white-space: nowrap; }
-    th:first-child, td:first-child { text-align: left; }
-    .table-wrap { overflow-x: auto; }
-    code { color: #b8d7ff; }
+    :root {
+      --bg: #0a0a0f;
+      --fg: #e0e0e0;
+      --accent: #00d4aa;
+      --danger: #ff4757;
+      --warn: #ffa502;
+      --surface: #16161f;
+    }
+    
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+      touch-action: manipulation;
+    }
+    
+    /* Display power saving */
+    body.display-off #app {
+      opacity: 0.02;
+      filter: blur(2px);
+      transition: opacity 0.6s ease, filter 0.6s ease;
+      pointer-events: none;
+    }
+    body.display-off #wake-overlay {
+      display: flex;
+    }
+    
+    #app {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      padding: 24px;
+      gap: 16px;
+      opacity: 1;
+      filter: none;
+      transition: opacity 0.3s ease, filter 0.3s ease;
+    }
+    
+    #wake-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: transparent;
+      z-index: 999;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255,255,255,0.1);
+      font-size: 14px;
+      letter-spacing: 2px;
+    }
+    
+    header {
+      text-align: center;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #222;
+    }
+    h1 { font-size: 1.3rem; font-weight: 600; letter-spacing: 0.5px; }
+    .subtitle { font-size: 0.75rem; color: #666; margin-top: 4px; }
+    
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.8rem;
+      padding: 10px 14px;
+      background: var(--surface);
+      border-radius: 12px;
+      border: 1px solid #222;
+    }
+    .status-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #333; display: inline-block; margin-right: 6px;
+    }
+    .status-dot.connected { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    .status-dot.recording { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .metric {
+      background: var(--surface);
+      padding: 14px;
+      border-radius: 12px;
+      text-align: center;
+      border: 1px solid #222;
+    }
+    .metric-value {
+      font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums;
+      color: var(--accent);
+    }
+    .metric-label { font-size: 0.7rem; color: #777; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    
+    .controls {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: auto;
+      padding-bottom: 20px;
+    }
+    
+    button {
+      border: none; border-radius: 14px; padding: 18px;
+      font-size: 1rem; font-weight: 600; color: #fff;
+      cursor: pointer; transition: transform 0.1s, opacity 0.2s;
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      letter-spacing: 0.3px;
+    }
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    
+    .btn-connect { background: #2d3436; border: 1px solid #444; }
+    .btn-start { background: var(--accent); color: #000; }
+    .btn-stop { background: var(--danger); }
+    .btn-refresh { background: var(--warn); color: #000; }
+    .btn-download { background: #3742fa; }
+    
+    .row { display: flex; gap: 10px; }
+    .row button { flex: 1; }
+    
+    .log {
+      font-family: 'SF Mono', Monaco, monospace;
+      font-size: 0.7rem;
+      color: #555;
+      max-height: 60px;
+      overflow-y: auto;
+      padding: 8px;
+      background: var(--surface);
+      border-radius: 8px;
+      border: 1px solid #1a1a1a;
+      line-height: 1.4;
+    }
+    .log div { margin-bottom: 2px; }
   </style>
 </head>
 <body>
-<main>
-  <h1>XIAO IMU Recorder</h1>
-  <div class="muted">200 Hz accelerometer + gyroscope capture over Web Bluetooth</div>
 
-  <section class="panel">
-    <div class="buttons">
-      <button id="connect">Connect</button>
-      <button id="start" disabled>Start recording</button>
-      <button id="stop" class="danger" disabled>Stop recording</button>
-      <button id="refresh" class="secondary" disabled>Refresh status</button>
-      <button id="download" class="secondary" disabled>Download CSV</button>
-      <button id="clear" class="secondary" disabled>Clear data</button>
-    </div>
-    <div class="grid">
-      <div class="metric"><span>Connection</span><strong id="connection">Disconnected</strong></div>
-      <div class="metric"><span>Recorder</span><strong id="state">Idle</strong></div>
-      <div class="metric"><span>Samples received</span><strong id="samples">0</strong></div>
-      <div class="metric"><span>Effective rate</span><strong id="rate">0 Hz</strong></div>
-      <div class="metric"><span>Board buffer</span><strong id="buffered">0</strong></div>
-      <div class="metric"><span>Missing / dropped</span><strong id="dropped">0</strong></div>
-    </div>
-    <p id="message" class="muted">Use Chrome or Edge and connect to “XIAO IMU 200Hz”.</p>
-  </section>
+<div id="wake-overlay">TAP TO WAKE</div>
 
-  <section class="panel">
-    <h2>Latest samples</h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Unix ms</th><th>ax (g)</th><th>ay (g)</th><th>az (g)</th><th>gx (°/s)</th><th>gy (°/s)</th><th>gz (°/s)</th></tr></thead>
-        <tbody id="rows"><tr><td colspan="7" class="muted">No data yet</td></tr></tbody>
-      </table>
+<div id="app">
+  <header>
+    <h1>IMU Recorder</h1>
+    <div class="subtitle">BLE Streamer &bull; 200 Hz &bull; Web Bluetooth</div>
+  </header>
+  
+  <div class="status-bar">
+    <span><span id="conn-dot" class="status-dot"></span><span id="conn-text">Disconnected</span></span>
+    <span id="rec-indicator" style="display:none; color:var(--danger); font-weight:600;">● REC</span>
+  </div>
+  
+  <div class="metrics">
+    <div class="metric">
+      <div class="metric-value" id="sample-count">0</div>
+      <div class="metric-label">Samples</div>
     </div>
-  </section>
-
-  <section class="panel muted">
-    Web Bluetooth requires a secure context. On a PC, serve this folder with
-    <code>python -m http.server 8000</code> and open <code>http://localhost:8000</code>.
-    For Android, host this file on HTTPS and open it in Chrome. iOS browsers do not
-    provide native Web Bluetooth support.
-  </section>
-</main>
+    <div class="metric">
+      <div class="metric-value" id="packet-loss">0</div>
+      <div class="metric-label">Dropped</div>
+    </div>
+  </div>
+  
+  <div class="log" id="log"></div>
+  
+  <div class="controls">
+    <button class="btn-connect" id="btn-connect" onclick="connect()">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      Pair Device
+    </button>
+    
+    <button class="btn-start" id="btn-start" onclick="startRecording()" disabled>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+      Start Recording
+    </button>
+    
+    <button class="btn-stop" id="btn-stop" onclick="stopRecording()" disabled>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      Stop Recording
+    </button>
+    
+    <div class="row">
+      <button class="btn-refresh" id="btn-refresh" onclick="refreshConnection()" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        Refresh
+      </button>
+      <button class="btn-download" id="btn-download" onclick="downloadCSV()" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        Download CSV
+      </button>
+    </div>
+  </div>
+</div>
 
 <script>
-'use strict';
+// ==================== BLE CONFIG ====================
+const SERVICE_UUID       = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+const CHAR_TIME_UUID     = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+const CHAR_CONTROL_UUID  = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
+const CHAR_DATA_UUID     = 'beb5483e-36e1-4688-b7f5-ea07361b26aa';
 
-const SERVICE_UUID = '91bad492-b950-4226-aa2b-4ede9fa42f59';
-const DATA_UUID = 'cba1d466-344c-4be3-ab3f-189f80dd7518';
-const CONTROL_UUID = 'cba1d466-344c-4be3-ab3f-189f80dd7519';
-const STATUS_UUID = 'cba1d466-344c-4be3-ab3f-189f80dd7520';
-const SAMPLE_PERIOD_MS = 5;
-const ACCEL_G_PER_LSB = 0.000122;  // LSM6DS3 at +/-4 g
-const GYRO_DPS_PER_LSB = 0.0175;   // LSM6DS3 at +/-500 dps
+// ==================== STATE ====================
+let device = null;
+let server = null;
+let service = null;
+let timeChar = null;
+let controlChar = null;
+let dataChar = null;
 
-let device, server, dataChar, controlChar, statusChar;
+let baseEpochMs = 0;
 let recording = false;
-let stopping = false;
-let startEpochMs = 0;
 let samples = [];
-let latest = [];
-let missingFromSequence = 0;
-let boardDropped = 0;
-let expectedSampleSequence = null;
-let firstArrivalTime = 0;
-let lastArrivalTime = 0;
+let lastSeq = -1;
+let droppedPackets = 0;
 
-const $ = id => document.getElementById(id);
-const connectButton = $('connect');
-const startButton = $('start');
-const stopButton = $('stop');
-const refreshButton = $('refresh');
-const downloadButton = $('download');
-const clearButton = $('clear');
+// Scales for MPU6050 defaults (±2g, ±250°/s)
+const ACCEL_SCALE = 2.0 / 32768.0;
+const GYRO_SCALE  = 250.0 / 32768.0;
 
-function setMessage(text, kind = 'muted') {
-  $('message').className = kind;
-  $('message').textContent = text;
-}
-
-function setConnected(connected) {
-  $('connection').textContent = connected ? device?.name || 'Connected' : 'Disconnected';
-  $('connection').className = connected ? 'ok' : 'bad';
-  connectButton.textContent = connected ? 'Disconnect' : 'Connect';
-  startButton.disabled = !connected || recording || stopping;
-  stopButton.disabled = !connected || !recording;
-  refreshButton.disabled = !connected;
-  downloadButton.disabled = samples.length === 0;
-  clearButton.disabled = samples.length === 0 || recording || stopping;
-}
-
-function updateStats() {
-  $('samples').textContent = samples.length.toLocaleString();
-  $('dropped').textContent = Math.max(boardDropped, missingFromSequence).toLocaleString();
-  if (samples.length > 1 && lastArrivalTime > firstArrivalTime) {
-    const hz = (samples.length - 1) * 1000 / (lastArrivalTime - firstArrivalTime);
-    $('rate').textContent = `${hz.toFixed(1)} Hz`;
-  }
-  downloadButton.disabled = samples.length === 0;
-  clearButton.disabled = samples.length === 0 || recording || stopping;
-}
-
-function renderLatest() {
-  if (!latest.length) {
-    $('rows').innerHTML = '<tr><td colspan="7" class="muted">No data yet</td></tr>';
-    return;
-  }
-  $('rows').innerHTML = latest.slice(-10).reverse().map(s =>
-    `<tr><td>${s.t.toFixed(3)}</td><td>${s.ax.toFixed(5)}</td>` +
-    `<td>${s.ay.toFixed(5)}</td><td>${s.az.toFixed(5)}</td>` +
-    `<td>${s.gx.toFixed(4)}</td><td>${s.gy.toFixed(4)}</td><td>${s.gz.toFixed(4)}</td></tr>`
-  ).join('');
-}
-
-function clearData() {
-  samples = [];
-  latest = [];
-  expectedSampleSequence = null;
-  missingFromSequence = 0;
-  boardDropped = 0;
-  firstArrivalTime = lastArrivalTime = 0;
-  $('buffered').textContent = '0';
-  $('rate').textContent = '0 Hz';
-  renderLatest();
-  updateStats();
-}
-
-async function writeCommand(bytes) {
-  // The response form is more widely implemented than write-without-response.
-  if (controlChar.writeValueWithResponse) await controlChar.writeValueWithResponse(bytes);
-  else await controlChar.writeValue(bytes);
-}
-
-async function connect() {
-  if (!navigator.bluetooth) {
-    throw new Error('Web Bluetooth is unavailable. Use current Chrome/Edge in a secure context.');
-  }
-  device = await navigator.bluetooth.requestDevice({
-    filters: [{ services: [SERVICE_UUID] }]
-  });
-  device.addEventListener('gattserverdisconnected', onDisconnected);
-  server = await device.gatt.connect();
-  const service = await server.getPrimaryService(SERVICE_UUID);
-  [dataChar, controlChar, statusChar] = await Promise.all([
-    service.getCharacteristic(DATA_UUID),
-    service.getCharacteristic(CONTROL_UUID),
-    service.getCharacteristic(STATUS_UUID)
-  ]);
-  dataChar.addEventListener('characteristicvaluechanged', onData);
-  statusChar.addEventListener('characteristicvaluechanged', onStatus);
-  await dataChar.startNotifications();
-  await statusChar.startNotifications();
-  setConnected(true);
-  setMessage('Connected. Ready to record.', 'ok');
-  await writeCommand(Uint8Array.of(0x03));
-}
-
-function onDisconnected() {
-  recording = false;
-  stopping = false;
-  server = dataChar = controlChar = statusChar = null;
-  $('state').textContent = 'Idle';
-  setConnected(false);
-  setMessage('Bluetooth disconnected. Data already received remains available.', 'warn');
-}
-
-async function toggleConnection() {
+// ==================== AUDIO BEEP ====================
+function beep(freq = 880, duration = 0.15, type = 'sine') {
   try {
-    if (device?.gatt?.connected) {
-      device.gatt.disconnect();
-    } else {
-      await connect();
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + duration);
+  } catch(e) { console.log('Audio beep failed', e); }
+}
+
+// ==================== DISPLAY POWER MANAGEMENT ====================
+let displayTimer = null;
+const DISPLAY_OFF_DELAY = 5000;   // Turn off after 5s inactivity
+const DISPLAY_ON_DURATION = 3000; // Stay on for 3s after touch
+
+function wakeDisplay() {
+  document.body.classList.remove('display-off');
+  clearTimeout(displayTimer);
+  displayTimer = setTimeout(() => {
+    if (!recording) {  // Keep display on while recording
+      document.body.classList.add('display-off');
     }
-  } catch (error) {
-    setMessage(error.message || String(error), 'bad');
-    setConnected(false);
+  }, DISPLAY_ON_DURATION);
+}
+
+function scheduleDisplayOff() {
+  clearTimeout(displayTimer);
+  displayTimer = setTimeout(() => {
+    if (!recording) {
+      document.body.classList.add('display-off');
+    }
+  }, DISPLAY_OFF_DELAY);
+}
+
+// Touch / mouse events to wake
+['touchstart', 'mousedown', 'mousemove', 'keydown'].forEach(evt => {
+  document.addEventListener(evt, () => {
+    if (document.body.classList.contains('display-off')) {
+      wakeDisplay();
+    } else {
+      scheduleDisplayOff();
+    }
+  }, { passive: true });
+});
+
+document.getElementById('wake-overlay').addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  wakeDisplay();
+});
+document.getElementById('wake-overlay').addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  wakeDisplay();
+});
+
+// Start display-off timer on load
+scheduleDisplayOff();
+
+// Keep display on while recording
+setInterval(() => {
+  if (recording) {
+    document.body.classList.remove('display-off');
+  }
+}, 1000);
+
+// ==================== LOGGING ====================
+function log(msg) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  while (el.children.length > 20) el.removeChild(el.firstChild);
+}
+
+// ==================== BLE CONNECTION ====================
+async function connect() {
+  try {
+    log('Requesting BLE device...');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'IMU-Recorder' }],
+      optionalServices: [SERVICE_UUID]
+    });
+    
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+    
+    log('Connecting GATT...');
+    server = await device.gatt.connect();
+    
+    // Request high throughput if available
+    if (server.device.gatt && server.device.gatt.requestConnectionPriority) {
+      await server.device.gatt.requestConnectionPriority('high');
+    }
+    
+    log('Getting service...');
+    service = await server.getPrimaryService(SERVICE_UUID);
+    
+    timeChar    = await service.getCharacteristic(CHAR_TIME_UUID);
+    controlChar = await service.getCharacteristic(CHAR_CONTROL_UUID);
+    dataChar    = await service.getCharacteristic(CHAR_DATA_UUID);
+    
+    // Sync Unix time (seconds as uint32 little-endian)
+    const nowSec = Math.floor(Date.now() / 1000);
+    const timeBuf = new ArrayBuffer(4);
+    new DataView(timeBuf).setUint32(0, nowSec, true);
+    await timeChar.writeValue(timeBuf);
+    baseEpochMs = nowSec * 1000;
+    log(`Synced epoch: ${nowSec}`);
+    
+    // Start notifications
+    await dataChar.startNotifications();
+    dataChar.addEventListener('characteristicvaluechanged', onData);
+    
+    updateUI(true);
+    log('Connected and ready');
+    beep(660, 0.1);
+    
+  } catch (err) {
+    log('Error: ' + err.message);
+    console.error(err);
   }
 }
 
-async function startRecording() {
-  try {
-    clearData();
-    startEpochMs = Date.now();
-    const command = new ArrayBuffer(9);
-    const view = new DataView(command);
-    view.setUint8(0, 0x01);
-    view.setBigUint64(1, BigInt(startEpochMs), true);
-    await writeCommand(command);
-    recording = true;
-    stopping = false;
-    firstArrivalTime = lastArrivalTime = performance.now();
-    $('state').textContent = 'Recording';
-    $('state').className = 'bad';
-    startButton.disabled = true;
-    stopButton.disabled = false;
-    clearButton.disabled = true;
-    setMessage(`Recording started at Unix epoch ${startEpochMs} ms.`, 'ok');
-  } catch (error) {
-    setMessage(`Could not start: ${error.message || error}`, 'bad');
+function onDisconnect() {
+  log('Disconnected');
+  recording = false;
+  updateUI(false);
+  device = null; server = null; service = null;
+}
+
+async function refreshConnection() {
+  if (device && device.gatt.connected) {
+    // Resync time
+    const nowSec = Math.floor(Date.now() / 1000);
+    const timeBuf = new ArrayBuffer(4);
+    new DataView(timeBuf).setUint32(0, nowSec, true);
+    await timeChar.writeValue(timeBuf);
+    baseEpochMs = nowSec * 1000;
+    log('Time refreshed');
+    beep(880, 0.08);
+  } else {
+    log('Not connected');
   }
+}
+
+// ==================== CONTROL ====================
+async function startRecording() {
+  if (!controlChar) return;
+  recording = true;
+  samples = [];
+  lastSeq = -1;
+  droppedPackets = 0;
+  updateMetrics();
+  
+  await controlChar.writeValue(new Uint8Array([0x01]));
+  beep(1047, 0.2, 'sine');  // High beep = start
+  log('Recording started');
+  updateUI(true);
 }
 
 async function stopRecording() {
-  try {
-    recording = false;
-    stopping = true;
-    stopButton.disabled = true;
-    $('state').textContent = 'Flushing';
-    $('state').className = 'warn';
-    setMessage('Stopping; waiting for the board buffer to flush…', 'warn');
-    await writeCommand(Uint8Array.of(0x02));
-  } catch (error) {
-    stopping = false;
-    setMessage(`Could not stop: ${error.message || error}`, 'bad');
-    setConnected(Boolean(device?.gatt?.connected));
-  }
+  if (!controlChar) return;
+  recording = false;
+  await controlChar.writeValue(new Uint8Array([0x00]));
+  beep(440, 0.25, 'sine');  // Low beep = stop
+  log(`Recording stopped. ${samples.length} samples captured.`);
+  updateUI(true);
 }
 
+// ==================== DATA PARSING ====================
 function onData(event) {
-  const view = event.target.value;
-  if (view.byteLength < 16 || view.getUint8(0) !== 0xA1) return;
-  const count = view.getUint8(1);
-  const firstSequence = view.getUint32(4, true);
-  const firstEpochUs = view.getBigUint64(8, true);
-  if (view.byteLength !== 16 + count * 12) {
-    setMessage(`Rejected malformed ${view.byteLength}-byte data packet.`, 'bad');
+  const value = event.target.value;
+  const dv = new DataView(value.buffer);
+  
+  const seq = dv.getUint8(0);
+  const count = dv.getUint8(1);
+  
+  // Detect packet loss
+  if (lastSeq >= 0) {
+    const expected = (lastSeq + 1) & 0xFF;
+    if (seq !== expected) {
+      const lost = (seq - expected + 256) & 0xFF;
+      droppedPackets += lost;
+    }
+  }
+  lastSeq = seq;
+  
+  // Parse sample(s) — currently 1 sample per packet (16 bytes data)
+  let offset = 2;
+  for (let i = 0; i < count; i++) {
+    const relMs = dv.getUint32(offset, true);
+    offset += 4;
+    const ax = dv.getInt16(offset, true); offset += 2;
+    const ay = dv.getInt16(offset, true); offset += 2;
+    const az = dv.getInt16(offset, true); offset += 2;
+    const gx = dv.getInt16(offset, true); offset += 2;
+    const gy = dv.getInt16(offset, true); offset += 2;
+    const gz = dv.getInt16(offset, true); offset += 2;
+    
+    const timestamp = baseEpochMs + relMs;
+    
+    samples.push({
+      timestamp,
+      ax: ax * ACCEL_SCALE,
+      ay: ay * ACCEL_SCALE,
+      az: az * ACCEL_SCALE,
+      gx: gx * GYRO_SCALE,
+      gy: gy * GYRO_SCALE,
+      gz: gz * GYRO_SCALE
+    });
+  }
+  
+  updateMetrics();
+}
+
+function updateMetrics() {
+  document.getElementById('sample-count').textContent = samples.length.toLocaleString();
+  document.getElementById('packet-loss').textContent = droppedPackets.toLocaleString();
+}
+
+// ==================== CSV DOWNLOAD ====================
+function downloadCSV() {
+  if (samples.length === 0) {
+    log('No data to download');
     return;
   }
-
-  if (expectedSampleSequence !== null && firstSequence > expectedSampleSequence) {
-    missingFromSequence += firstSequence - expectedSampleSequence;
-  }
-  // Duplicate/replayed packets are ignored, while a gap remains visible.
-  let skip = expectedSampleSequence !== null && firstSequence < expectedSampleSequence
-    ? Math.min(count, expectedSampleSequence - firstSequence) : 0;
-
-  for (let i = skip; i < count; i++) {
-    const o = 16 + i * 12;
-    const sequence = firstSequence + i;
-    const sample = {
-      t: Number(firstEpochUs + BigInt(i * 5000)) / 1000,
-      gx: view.getInt16(o + 0, true) * GYRO_DPS_PER_LSB,
-      gy: view.getInt16(o + 2, true) * GYRO_DPS_PER_LSB,
-      gz: view.getInt16(o + 4, true) * GYRO_DPS_PER_LSB,
-      ax: view.getInt16(o + 6, true) * ACCEL_G_PER_LSB,
-      ay: view.getInt16(o + 8, true) * ACCEL_G_PER_LSB,
-      az: view.getInt16(o + 10, true) * ACCEL_G_PER_LSB
-    };
-    samples.push(sample);
-    latest.push(sample);
-  }
-  if (latest.length > 10) latest.splice(0, latest.length - 10);
-  expectedSampleSequence = Math.max(expectedSampleSequence ?? 0, firstSequence + count);
-  lastArrivalTime = performance.now();
-  renderLatest();
-  updateStats();
-}
-
-function onStatus(event) {
-  const view = event.target.value;
-  if (view.byteLength < 14 || view.getUint8(0) !== 0x53 || view.getUint8(1) !== 0x54) return;
-  const state = view.getUint8(3);
-  const buffered = view.getUint16(4, true);
-  boardDropped = view.getUint32(6, true);
-  $('buffered').textContent = buffered.toLocaleString();
-  $('state').textContent = ['Idle', 'Recording', 'Flushing'][state] || `Unknown (${state})`;
-  $('state').className = state === 1 ? 'bad' : state === 2 ? 'warn' : 'ok';
-
-  if (state === 0 && stopping) {
-    stopping = false;
-    recording = false;
-    setMessage(`Recording complete: ${samples.length.toLocaleString()} samples ready.`, 'ok');
-    setConnected(true);
-  }
-  updateStats();
-}
-
-function downloadCsv() {
-  if (!samples.length) return;
-  const lines = ['unix_epoch_ms,iso_utc,accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps'];
-  for (const s of samples) {
-    lines.push(`${s.t.toFixed(3)},${new Date(s.t).toISOString()},${s.ax.toFixed(6)},${s.ay.toFixed(6)},${s.az.toFixed(6)},${s.gx.toFixed(5)},${s.gy.toFixed(5)},${s.gz.toFixed(5)}`);
-  }
-  const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/csv;charset=utf-8' });
+  
+  const header = 'Timestamp_ms,Unix_Time,Accel_X_g,Accel_Y_g,Accel_Z_g,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps\n';
+  const rows = samples.map(s => {
+    const date = new Date(s.timestamp);
+    const unixSec = (s.timestamp / 1000).toFixed(3);
+    return `${s.timestamp},${unixSec},${s.ax.toFixed(6)},${s.ay.toFixed(6)},${s.az.toFixed(6)},${s.gx.toFixed(4)},${s.gy.toFixed(4)},${s.gz.toFixed(4)}`;
+  }).join('\n');
+  
+  const blob = new Blob([header + rows], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `xiao_imu_${new Date(startEpochMs).toISOString().replaceAll(':', '-')}.csv`;
+  const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
+  a.download = `imu_recording_${dateStr}.csv`;
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  
+  log(`Downloaded ${samples.length} samples`);
+  beep(880, 0.1);
 }
 
-connectButton.addEventListener('click', toggleConnection);
-startButton.addEventListener('click', startRecording);
-stopButton.addEventListener('click', stopRecording);
-refreshButton.addEventListener('click', () => writeCommand(Uint8Array.of(0x03)).catch(e => setMessage(e.message, 'bad')));
-downloadButton.addEventListener('click', downloadCsv);
-clearButton.addEventListener('click', clearData);
-setConnected(false);
+// ==================== UI UPDATES ====================
+function updateUI(connected) {
+  document.getElementById('btn-connect').disabled = connected;
+  document.getElementById('btn-start').disabled = !connected || recording;
+  document.getElementById('btn-stop').disabled = !connected || !recording;
+  document.getElementById('btn-refresh').disabled = !connected;
+  document.getElementById('btn-download').disabled = samples.length === 0;
+  
+  const dot = document.getElementById('conn-dot');
+  const txt = document.getElementById('conn-text');
+  const rec = document.getElementById('rec-indicator');
+  
+  if (connected) {
+    dot.classList.add('connected');
+    txt.textContent = 'Connected';
+  } else {
+    dot.classList.remove('connected');
+    txt.textContent = 'Disconnected';
+  }
+  
+  rec.style.display = recording ? 'inline' : 'none';
+  if (recording) dot.classList.add('recording');
+  else dot.classList.remove('recording');
+}
+
+// Check for Web Bluetooth support
+if (!navigator.bluetooth) {
+  log('Web Bluetooth not supported. Use Chrome/Edge on desktop or Android.');
+  alert('Web Bluetooth is not supported in this browser. Please use Chrome or Edge.');
+}
 </script>
+
 </body>
 </html>
