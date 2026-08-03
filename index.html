@@ -25,7 +25,6 @@
       touch-action: manipulation;
     }
     
-    /* Display power saving */
     body.display-off #app {
       opacity: 0.02;
       filter: blur(2px);
@@ -88,21 +87,23 @@
     
     .metrics {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 10px;
     }
     .metric {
       background: var(--surface);
-      padding: 14px;
+      padding: 14px 10px;
       border-radius: 12px;
       text-align: center;
       border: 1px solid #222;
     }
     .metric-value {
-      font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums;
+      font-size: 1.4rem; font-weight: 700; font-variant-numeric: tabular-nums;
       color: var(--accent);
     }
-    .metric-label { font-size: 0.7rem; color: #777; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .metric-label { font-size: 0.65rem; color: #777; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .metric.danger .metric-value { color: var(--danger); }
+    .metric.warn .metric-value { color: var(--warn); }
     
     .controls {
       display: flex;
@@ -153,12 +154,12 @@
 <div id="app">
   <header>
     <h1>IMU Recorder</h1>
-    <div class="subtitle">BLE Streamer &bull; 200 Hz &bull; Web Bluetooth</div>
+    <div class="subtitle">BLE Streamer &bull; 200 Hz &bull; Batched x4</div>
   </header>
   
   <div class="status-bar">
     <span><span id="conn-dot" class="status-dot"></span><span id="conn-text">Disconnected</span></span>
-    <span id="rec-indicator" style="display:none; color:var(--danger); font-weight:600;">● REC</span>
+    <span id="rec-indicator" style="display:none; color:var(--danger); font-weight:600;">&#9679; REC</span>
   </div>
   
   <div class="metrics">
@@ -166,9 +167,13 @@
       <div class="metric-value" id="sample-count">0</div>
       <div class="metric-label">Samples</div>
     </div>
-    <div class="metric">
+    <div class="metric" id="pkt-metric">
       <div class="metric-value" id="packet-loss">0</div>
-      <div class="metric-label">Dropped</div>
+      <div class="metric-label">Dropped Pkts</div>
+    </div>
+    <div class="metric">
+      <div class="metric-value" id="batch-size">0</div>
+      <div class="metric-label">Batch /Pkt</div>
     </div>
   </div>
   
@@ -223,8 +228,10 @@ let recording = false;
 let samples = [];
 let lastSeq = -1;
 let droppedPackets = 0;
+let totalPackets = 0;
+let batchAccumulator = 0;
+let batchCount = 0;
 
-// Scales for MPU6050 defaults (±2g, ±250°/s)
 const ACCEL_SCALE = 2.0 / 32768.0;
 const GYRO_SCALE  = 250.0 / 32768.0;
 
@@ -247,56 +254,42 @@ function beep(freq = 880, duration = 0.15, type = 'sine') {
 
 // ==================== DISPLAY POWER MANAGEMENT ====================
 let displayTimer = null;
-const DISPLAY_OFF_DELAY = 5000;   // Turn off after 5s inactivity
-const DISPLAY_ON_DURATION = 3000; // Stay on for 3s after touch
+const DISPLAY_OFF_DELAY = 5000;
+const DISPLAY_ON_DURATION = 3000;
 
 function wakeDisplay() {
   document.body.classList.remove('display-off');
   clearTimeout(displayTimer);
   displayTimer = setTimeout(() => {
-    if (!recording) {  // Keep display on while recording
-      document.body.classList.add('display-off');
-    }
+    if (!recording) document.body.classList.add('display-off');
   }, DISPLAY_ON_DURATION);
 }
 
 function scheduleDisplayOff() {
   clearTimeout(displayTimer);
   displayTimer = setTimeout(() => {
-    if (!recording) {
-      document.body.classList.add('display-off');
-    }
+    if (!recording) document.body.classList.add('display-off');
   }, DISPLAY_OFF_DELAY);
 }
 
-// Touch / mouse events to wake
 ['touchstart', 'mousedown', 'mousemove', 'keydown'].forEach(evt => {
   document.addEventListener(evt, () => {
-    if (document.body.classList.contains('display-off')) {
-      wakeDisplay();
-    } else {
-      scheduleDisplayOff();
-    }
+    if (document.body.classList.contains('display-off')) wakeDisplay();
+    else scheduleDisplayOff();
   }, { passive: true });
 });
 
 document.getElementById('wake-overlay').addEventListener('touchstart', (e) => {
-  e.preventDefault();
-  wakeDisplay();
+  e.preventDefault(); wakeDisplay();
 });
 document.getElementById('wake-overlay').addEventListener('mousedown', (e) => {
-  e.preventDefault();
-  wakeDisplay();
+  e.preventDefault(); wakeDisplay();
 });
 
-// Start display-off timer on load
 scheduleDisplayOff();
 
-// Keep display on while recording
 setInterval(() => {
-  if (recording) {
-    document.body.classList.remove('display-off');
-  }
+  if (recording) document.body.classList.remove('display-off');
 }, 1000);
 
 // ==================== LOGGING ====================
@@ -323,10 +316,13 @@ async function connect() {
     log('Connecting GATT...');
     server = await device.gatt.connect();
     
-    // Request high throughput if available
-    if (server.device.gatt && server.device.gatt.requestConnectionPriority) {
-      await server.device.gatt.requestConnectionPriority('high');
-    }
+    // Request high throughput (Android only, silently fails elsewhere)
+    try {
+      if (server.device && server.device.gatt && server.device.gatt.requestConnectionPriority) {
+        await server.device.gatt.requestConnectionPriority('high');
+        log('Connection priority: high');
+      }
+    } catch(e) { /* ignore */ }
     
     log('Getting service...');
     service = await server.getPrimaryService(SERVICE_UUID);
@@ -335,7 +331,7 @@ async function connect() {
     controlChar = await service.getCharacteristic(CHAR_CONTROL_UUID);
     dataChar    = await service.getCharacteristic(CHAR_DATA_UUID);
     
-    // Sync Unix time (seconds as uint32 little-endian)
+    // Sync Unix time
     const nowSec = Math.floor(Date.now() / 1000);
     const timeBuf = new ArrayBuffer(4);
     new DataView(timeBuf).setUint32(0, nowSec, true);
@@ -343,7 +339,6 @@ async function connect() {
     baseEpochMs = nowSec * 1000;
     log(`Synced epoch: ${nowSec}`);
     
-    // Start notifications
     await dataChar.startNotifications();
     dataChar.addEventListener('characteristicvaluechanged', onData);
     
@@ -366,7 +361,6 @@ function onDisconnect() {
 
 async function refreshConnection() {
   if (device && device.gatt.connected) {
-    // Resync time
     const nowSec = Math.floor(Date.now() / 1000);
     const timeBuf = new ArrayBuffer(4);
     new DataView(timeBuf).setUint32(0, nowSec, true);
@@ -386,10 +380,13 @@ async function startRecording() {
   samples = [];
   lastSeq = -1;
   droppedPackets = 0;
+  totalPackets = 0;
+  batchAccumulator = 0;
+  batchCount = 0;
   updateMetrics();
   
   await controlChar.writeValue(new Uint8Array([0x01]));
-  beep(1047, 0.2, 'sine');  // High beep = start
+  beep(1047, 0.2, 'sine');
   log('Recording started');
   updateUI(true);
 }
@@ -398,7 +395,7 @@ async function stopRecording() {
   if (!controlChar) return;
   recording = false;
   await controlChar.writeValue(new Uint8Array([0x00]));
-  beep(440, 0.25, 'sine');  // Low beep = stop
+  beep(440, 0.25, 'sine');
   log(`Recording stopped. ${samples.length} samples captured.`);
   updateUI(true);
 }
@@ -411,6 +408,10 @@ function onData(event) {
   const seq = dv.getUint8(0);
   const count = dv.getUint8(1);
   
+  totalPackets++;
+  batchAccumulator += count;
+  batchCount++;
+  
   // Detect packet loss
   if (lastSeq >= 0) {
     const expected = (lastSeq + 1) & 0xFF;
@@ -421,7 +422,6 @@ function onData(event) {
   }
   lastSeq = seq;
   
-  // Parse sample(s) — currently 1 sample per packet (16 bytes data)
   let offset = 2;
   for (let i = 0; i < count; i++) {
     const relMs = dv.getUint32(offset, true);
@@ -452,6 +452,18 @@ function onData(event) {
 function updateMetrics() {
   document.getElementById('sample-count').textContent = samples.length.toLocaleString();
   document.getElementById('packet-loss').textContent = droppedPackets.toLocaleString();
+  
+  const batchEl = document.getElementById('batch-size');
+  if (batchCount > 0) {
+    batchEl.textContent = (batchAccumulator / batchCount).toFixed(1);
+  } else {
+    batchEl.textContent = '0';
+  }
+  
+  const pktMetric = document.getElementById('pkt-metric');
+  if (droppedPackets > 10) pktMetric.classList.add('danger');
+  else if (droppedPackets > 0) pktMetric.classList.add('warn');
+  else { pktMetric.classList.remove('danger', 'warn'); }
 }
 
 // ==================== CSV DOWNLOAD ====================
@@ -463,7 +475,6 @@ function downloadCSV() {
   
   const header = 'Timestamp_ms,Unix_Time,Accel_X_g,Accel_Y_g,Accel_Z_g,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps\n';
   const rows = samples.map(s => {
-    const date = new Date(s.timestamp);
     const unixSec = (s.timestamp / 1000).toFixed(3);
     return `${s.timestamp},${unixSec},${s.ax.toFixed(6)},${s.ay.toFixed(6)},${s.az.toFixed(6)},${s.gx.toFixed(4)},${s.gy.toFixed(4)},${s.gz.toFixed(4)}`;
   }).join('\n');
@@ -508,7 +519,6 @@ function updateUI(connected) {
   else dot.classList.remove('recording');
 }
 
-// Check for Web Bluetooth support
 if (!navigator.bluetooth) {
   log('Web Bluetooth not supported. Use Chrome/Edge on desktop or Android.');
   alert('Web Bluetooth is not supported in this browser. Please use Chrome or Edge.');
