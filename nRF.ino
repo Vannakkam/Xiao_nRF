@@ -1,255 +1,119 @@
-/*
- * IMU_BLE_Recorder_Final.ino
- * 
- * Xiao nRF52840 Sense — BLE IMU Streamer
- * Safe I2C, threshold send, 4-sample batching
- */
-
 #include <ArduinoBLE.h>
-#include <LSM6DS3.h>
-#include <Wire.h>
+#include <Arduino_LSM6DS3.H>
 
-const char* DEVICE_NAME = "BCMCH_GAIT-Right";  // Change to "IMU-Right", "IMU-Left", "IMU-Torso" for multi-sensor
+// BLE Service and Characteristic UUIDs
+BLEService imuService("19B10000-E8F2-537E-4F6C-D104768a1214");
+// Characteristic to stream IMU packet data (Notifications)
+BLECharacteristic imuDataChar("19B10001-E8F2-537E-4F6C-D104768a1214", BLERead | BLENotify, 20);
+// Characteristic to receive current Unix Epoch Time from Web Bluetooth (Write)
+BLEUnsignedIntCharacteristic timeSyncChar("19B10002-E8F2-537E-4F6C-D104768a1214", BLEWrite);
 
-const char* SERVICE_UUID      = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
-const char* CHAR_TIME_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-const char* CHAR_CONTROL_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
-const char* CHAR_DATA_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26aa";
+// Structure for a single IMU reading (compact binary footprint)
+typedef struct __attribute__((packed)) {
+  uint32_t timestamp_ms; // Relative ms offset from sync time
+  int16_t ax, ay, az;    // Accelerometer scaled (g * 1000)
+  int16_t gx, gy, gz;    // Gyroscope scaled (dps * 10)
+} IMUSample;
 
-#define LED_PIN LED_BUILTIN
-#define LED_ON  LOW
-#define LED_OFF HIGH
+// Pack multiple samples into a single BLE packet (e.g., 2 samples per 20-byte packet)
+#define SAMPLES_PER_PACKET 2
+typedef struct __attribute__((packed)) {
+  uint32_t base_epoch_sec; // Base unix time anchor
+  IMUSample samples[SAMPLES_PER_PACKET];
+} IMUPacket;
 
-LSM6DS3 imu(I2C_MODE, 0x6A);
+IMUPacket packetBuffer;
+uint8_t sampleCount = 0;
 
-const unsigned long SAMPLE_INTERVAL_US = 5000UL;
-unsigned long lastSampleUs = 0;
+unsigned long baseEpochSec = 0;
+unsigned long syncLocalMillis = 0;
+unsigned long lastSampleMicros = 0;
+const unsigned long sampleIntervalMicros = 5000; // 5 ms interval (200 Hz)
 
-struct Sample {
-  uint32_t relMs;
-  int16_t  ax, ay, az;
-  int16_t  gx, gy, gz;
-};
-
-#define BUFFER_SIZE 2048
-Sample sampleBuffer[BUFFER_SIZE];
-volatile uint16_t bufferHead = 0;
-volatile uint16_t bufferTail = 0;
-
-inline int bufferCount() {
-  return (bufferHead - bufferTail + BUFFER_SIZE) % BUFFER_SIZE;
-}
-inline bool bufferEmpty() {
-  return bufferHead == bufferTail;
-}
-inline bool bufferFull() {
-  return ((bufferHead + 1) % BUFFER_SIZE) == bufferTail;
-}
-
-volatile bool     recording    = false;
-volatile uint32_t baseEpochMs  = 0;
-volatile uint32_t baseMillis   = 0;
-uint8_t seqNum = 0;
-
-BLEService imuService(SERVICE_UUID);
-BLECharacteristic timeChar(CHAR_TIME_UUID, BLEWrite, 4);
-BLECharacteristic controlChar(CHAR_CONTROL_UUID, BLEWrite, 1);
-BLECharacteristic dataChar(CHAR_DATA_UUID, BLENotify, 200);
-
-void onTimeWritten(BLEDevice central, BLECharacteristic characteristic);
-void onControlWritten(BLEDevice central, BLECharacteristic characteristic);
+bool streamingActive = false;
 
 void setup() {
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LED_OFF);
-
   Serial.begin(115200);
-  for (int i = 0; i < 10 && !Serial; i++) delay(100);
-
-  Serial.println("\n=== IMU BLE Recorder ===");
-  Serial.println(DEVICE_NAME);
-
-  Wire.begin();
-  Wire.setClock(400000);
-
-  imu.settings.accelSampleRate = 416;
-  imu.settings.gyroSampleRate  = 416;
-  imu.settings.accelRange      = 2;
-  imu.settings.gyroRange       = 245;
-
-  int imuTries = 0;
-  while (imu.begin() != 0 && imuTries < 5) {
-    Serial.println("IMU retry...");
-    digitalWrite(LED_PIN, LED_ON); delay(100);
-    digitalWrite(LED_PIN, LED_OFF); delay(400);
-    imuTries++;
-  }
-  if (imuTries >= 5) {
-    Serial.println("IMU FATAL");
-    while (1) {
-      digitalWrite(LED_PIN, LED_ON); delay(100);
-      digitalWrite(LED_PIN, LED_OFF); delay(100);
-    }
-  }
-
-  imu.writeRegister(LSM6DS3_ACC_GYRO_CTRL1_XL, 0x60);
-  imu.writeRegister(LSM6DS3_ACC_GYRO_CTRL2_G, 0x60);
-  Serial.println("IMU OK");
+  while (!Serial);
 
   if (!BLE.begin()) {
-    Serial.println("BLE FATAL");
-    while (1) {
-      digitalWrite(LED_PIN, LED_ON); delay(50);
-      digitalWrite(LED_PIN, LED_OFF); delay(50);
-    }
+    Serial.println("Starting BLE failed!");
+    while (1);
   }
 
-  BLE.setLocalName(DEVICE_NAME);
-  BLE.setDeviceName(DEVICE_NAME);
+  if (!IMU.begin()) {
+    Serial.println("Failed to initialize IMU!");
+    while (1);
+  }
+
+  // Set BLE advertised name and service
+  BLE.setLocalName("XIAO-IMU");
   BLE.setAdvertisedService(imuService);
 
-  imuService.addCharacteristic(timeChar);
-  imuService.addCharacteristic(controlChar);
-  imuService.addCharacteristic(dataChar);
+  // Add characteristics
+  imuService.addCharacteristic(imuDataChar);
+  imuService.addCharacteristic(timeSyncChar);
   BLE.addService(imuService);
 
-  uint8_t zero[200] = {0};
-  dataChar.writeValue(zero, 200);
-  timeChar.writeValue((uint32_t)0);
-  controlChar.writeValue((uint8_t)0);
-
-  timeChar.setEventHandler(BLEWritten, onTimeWritten);
-  controlChar.setEventHandler(BLEWritten, onControlWritten);
-
+  // Start advertising
   BLE.advertise();
-  Serial.println("Advertising");
-  digitalWrite(LED_PIN, LED_ON);  // Solid ON
+  Serial.println("BLE IMU Peripheral active, waiting for connections...");
 }
 
 void loop() {
-  BLE.poll();  // CRITICAL: keep stack alive even when not connected
-
   BLEDevice central = BLE.central();
+
   if (central) {
-    Serial.print("Connected: ");
+    Serial.print("Connected to central: ");
     Serial.println(central.address());
 
-    recording = false;
-    seqNum = 0;
-    bufferHead = 0;
-    bufferTail = 0;
-
     while (central.connected()) {
-      unsigned long nowUs = micros();
-
-      if (nowUs - lastSampleUs >= SAMPLE_INTERVAL_US) {
-        lastSampleUs = nowUs;
-        if (recording) sampleIMU();
+      // Check if PC/Browser wrote new epoch time sync packet
+      if (timeSyncChar.written()) {
+        baseEpochSec = timeSyncChar.value();
+        syncLocalMillis = millis();
+        streamingActive = true;
+        lastSampleMicros = micros();
+        Serial.print("Time Synchronized via BLE Epoch: ");
+        Serial.println(baseEpochSec);
       }
 
-      if (recording && bufferCount() >= 4) {
-        sendSamples();
-      }
+      // If streaming is enabled and time sync is established, sample at 5ms intervals
+      if (streamingActive && baseEpochSec > 0) {
+        unsigned long currentMicros = micros();
+        if (currentMicros - lastSampleMicros >= sampleIntervalMicros) {
+          lastSampleMicros += sampleIntervalMicros; // maintain cadence
 
-      if (recording) {
-        digitalWrite(LED_PIN, ((millis() / 250) % 2) ? LED_ON : LED_OFF);
-      }
+          float ax, ay, az, gx, gy, gz;
+          if (IMU.accelerationAvailable() && IMU.gyroscopeAvailable()) {
+            IMU.readAcceleration(ax, ay, az);
+            IMU.readGyroscope(gx, gy, gz);
 
-      BLE.poll();
+            // Populate current sample slot
+            uint32_t relMs = millis() - syncLocalMillis;
+            packetBuffer.base_epoch_sec = baseEpochSec;
+            packetBuffer.samples[sampleCount].timestamp_ms = relMs;
+            packetBuffer.samples[sampleCount].ax = (int16_t)(ax * 1000);
+            packetBuffer.samples[sampleCount].ay = (int16_t)(ay * 1000);
+            packetBuffer.samples[sampleCount].az = (int16_t)(az * 1000);
+            packetBuffer.samples[sampleCount].gx = (int16_t)(gx * 10);
+            packetBuffer.samples[sampleCount].gy = (int16_t)(gy * 10);
+            packetBuffer.samples[sampleCount].gz = (int16_t)(gz * 10);
+
+            sampleCount++;
+
+            // Send packet when buffer is full to minimize BLE overhead & maximize battery efficiency
+            if (sampleCount >= SAMPLES_PER_PACKET) {
+              imuDataChar.writeValue((uint8_t*)&packetBuffer, sizeof(IMUPacket));
+              sampleCount = 0;
+            }
+          }
+        }
+      }
     }
 
-    Serial.println("Disconnected");
-    recording = false;
-    BLE.advertise();  // Restart advertising after disconnect
-    digitalWrite(LED_PIN, LED_ON);
-  }
-}
-
-void sampleIMU() {
-  if (bufferFull()) {
-    bufferTail = (bufferTail + 1) % BUFFER_SIZE;
-  }
-  Sample s;
-  s.relMs = (uint32_t)(millis() - baseMillis);
-
-  // Library raw reads (safe, well-tested)
-  s.ax = imu.readRawAccelX();
-  s.ay = imu.readRawAccelY();
-  s.az = imu.readRawAccelZ();
-  s.gx = imu.readRawGyroX();
-  s.gy = imu.readRawGyroY();
-  s.gz = imu.readRawGyroZ();
-
-  uint16_t idx = bufferHead;
-  sampleBuffer[idx] = s;
-  bufferHead = (idx + 1) % BUFFER_SIZE;
-}
-
-void sendSamples() {
-  int available = bufferCount();
-  if (available < 4) return;
-
-  int count = available < 4 ? available : 4;
-  uint8_t packet[2 + count * 16];
-
-  packet[0] = seqNum;
-  packet[1] = count;
-
-  int offset = 2;
-  for (int i = 0; i < count; i++) {
-    uint16_t idx = (bufferTail + i) % BUFFER_SIZE;
-    Sample s = sampleBuffer[idx];
-
-    packet[offset++] = (uint8_t)(s.relMs);
-    packet[offset++] = (uint8_t)(s.relMs >> 8);
-    packet[offset++] = (uint8_t)(s.relMs >> 16);
-    packet[offset++] = (uint8_t)(s.relMs >> 24);
-
-    packet[offset++] = (uint8_t)(s.ax);
-    packet[offset++] = (uint8_t)(s.ax >> 8);
-    packet[offset++] = (uint8_t)(s.ay);
-    packet[offset++] = (uint8_t)(s.ay >> 8);
-    packet[offset++] = (uint8_t)(s.az);
-    packet[offset++] = (uint8_t)(s.az >> 8);
-
-    packet[offset++] = (uint8_t)(s.gx);
-    packet[offset++] = (uint8_t)(s.gx >> 8);
-    packet[offset++] = (uint8_t)(s.gy);
-    packet[offset++] = (uint8_t)(s.gy >> 8);
-    packet[offset++] = (uint8_t)(s.gz);
-    packet[offset++] = (uint8_t)(s.gz >> 8);
-  }
-
-  int packetLen = 2 + count * 16;
-  if (dataChar.writeValue(packet, packetLen)) {
-    seqNum = (seqNum + 1) & 0xFF;
-    bufferTail = (bufferTail + count) % BUFFER_SIZE;
-  }
-}
-
-void onTimeWritten(BLEDevice central, BLECharacteristic characteristic) {
-  if (characteristic.valueLength() == 4) {
-    const uint8_t* v = characteristic.value();
-    uint32_t epochSec = ((uint32_t)v[0]) | ((uint32_t)v[1] << 8) | ((uint32_t)v[2] << 16) | ((uint32_t)v[3] << 24);
-    baseEpochMs = (uint32_t)epochSec * 1000UL;
-    baseMillis  = millis();
-    Serial.print("Time: "); Serial.println(epochSec);
-  }
-}
-
-void onControlWritten(BLEDevice central, BLECharacteristic characteristic) {
-  if (characteristic.valueLength() == 1) {
-    uint8_t cmd = characteristic.value()[0];
-    if (cmd == 0x01) {
-      recording = true;
-      seqNum = 0;
-      bufferHead = 0;
-      bufferTail = 0;
-      lastSampleUs = micros();
-      Serial.println("START");
-    } else if (cmd == 0x00) {
-      recording = false;
-      Serial.println("STOP");
-    }
+    streamingActive = false;
+    Serial.print("Disconnected from central: ");
+    Serial.println(central.address());
   }
 }
