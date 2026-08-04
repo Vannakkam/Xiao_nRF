@@ -9,7 +9,7 @@
 #include <LSM6DS3.h>
 #include <Wire.h>
 
-const char* DEVICE_NAME = "IMU-Recorder";  // Change to "IMU-Right", "IMU-Left", "IMU-Torso" for multi-sensor
+const char* DEVICE_NAME = "BCMCH_GAIT-Right";  // Change to "IMU-Right", "IMU-Left", "IMU-Torso" for multi-sensor
 
 const char* SERVICE_UUID      = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 const char* CHAR_TIME_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
