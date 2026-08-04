@@ -1,0 +1,45 @@
+streamlit run gait_streamlit_modified.py
+
+1. Three File Uploaders
+Replaced the single file uploader with three separate ones:
+
+    Right Leg IMU CSV
+    Left Leg IMU CSV
+    Torso IMU CSV
+
+Each is processed independently, and you can upload any combination (all three, just the legs, etc.).
+2. Patient Data Fields Added
+All fields are in the sidebar under 🧑‍⚕️ Patient Information:
+3. Patient Info Display Card
+A clean dashboard card at the top of the main area shows all entered patient data before the gait results.
+4. Per-Sensor Analysis
+Each uploaded sensor gets its own:
+
+    Metric cards (Cadence, Stride Length, Clearance, Stance/Swing times)
+    Expandable detailed metrics table
+
+5. Inter-Limb Asymmetry Analysis
+If both Right Leg and Left Leg are uploaded, an automatic asymmetry comparison section appears showing differences in cadence, stride length, stance/swing times, and ground clearance.
+6. Save / Export Features
+Two download buttons appear after analysis:
+
+    📥 Full Report (JSON) — Complete patient info + all raw and computed gait metrics per sensor
+    📥 Summary Table (CSV) — Clean tabular summary for easy spreadsheet import
+
+The filenames auto-include the UHID and recording date.
+
+streamlit run gait_streamlit_modified.py
+
+| Field                      | Input Type                       |
+| -------------------------- | -------------------------------- |
+| **Patient Name**           | Text                             |
+| **UHID Number**            | Text                             |
+| **Birth Date**             | Date picker                      |
+| **Recording Date**         | Date picker (defaults to today)  |
+| **Sex**                    | Dropdown (Male / Female / Other) |
+| **Height**                 | Text (cm)                        |
+| **Weight**                 | Text (kg)                        |
+| **Hip to Floor Length**    | Text (cm)                        |
+| **Knee to Floor Length**   | Text (cm)                        |
+| **Sensor to Floor Length** | Text (cm)                        |
+
