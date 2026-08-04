@@ -1,318 +1,228 @@
-/*
- * IMU_BLE_Recorder_Optimized.ino
- * 
- * Xiao nRF52840 Sense — BLE IMU Streamer (mbed core)
- * Optimizations: burst I2C read, threshold-based send, no timer drift
- * 
- * For multi-sensor setup, change DEVICE_NAME to:
- *   "IMU-Right", "IMU-Left", or "IMU-Torso"
- * 
- * Board: Seeed XIAO BLE Sense - nRF52840 (mbed-enabled)
- * Libraries: ArduinoBLE, Seeed Arduino LSM6DS3
- */
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Multi-IMU Recorder</title>
+<style>
+  :root{--bg:#0a0a0f;--fg:#e0e0e0;--accent:#00d4aa;--danger:#ff4757;--warn:#ffa502;--surface:#16161f;--ok:#2ed573;}
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;overflow:hidden;touch-action:manipulation}
+  #app{height:100%;display:flex;flex-direction:column;padding:16px;gap:12px}
+  header{text-align:center;padding-bottom:6px;border-bottom:1px solid #222}
+  h1{font-size:1.2rem;font-weight:600}
+  .subtitle{font-size:0.7rem;color:#666;margin-top:2px}
+  .sensors{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;flex:1;min-height:0}
+  @media(max-width:700px){.sensors{grid-template-columns:1fr}}
+  .card{background:var(--surface);border-radius:12px;border:1px solid #222;padding:12px;display:flex;flex-direction:column;gap:8px}
+  .card h2{font-size:0.9rem;color:var(--accent);text-align:center}
+  .status{display:flex;align-items:center;gap:6px;font-size:0.75rem}
+  .dot{width:10px;height:10px;border-radius:50%;background:#333}
+  .dot.on{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+  .dot.rec{background:var(--danger);box-shadow:0 0 6px var(--danger);animation:pulse 1s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+  .metrics{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:0.7rem}
+  .metric{background:#0f0f14;padding:6px;border-radius:8px;text-align:center}
+  .metric b{display:block;font-size:1.1rem;color:var(--accent);font-variant-numeric:tabular-nums}
+  .metric.warn b{color:var(--warn)}
+  .metric.danger b{color:var(--danger)}
+  button{border:none;border-radius:10px;padding:10px;font-size:0.8rem;font-weight:600;color:#fff;cursor:pointer;transition:transform .1s,opacity .2s}
+  button:active{transform:scale(0.97)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  .btn-c{background:#2d3436;border:1px solid #444}
+  .btn-s{background:var(--accent);color:#000}
+  .btn-x{background:var(--danger)}
+  .row{display:flex;gap:6px}
+  .row button{flex:1}
+  .global{display:flex;gap:10px;padding:8px;background:#111;border-radius:12px;border:1px solid #222}
+  .global button{flex:1;padding:14px;font-size:0.9rem}
+  .log{font-family:monospace;font-size:0.65rem;color:#555;max-height:50px;overflow-y:auto;padding:6px;background:#0a0a0f;border-radius:6px;line-height:1.4}
+  .log div{margin-bottom:2px}
+</style>
+<base target="_blank">
+</head>
+<body>
 
-#include <ArduinoBLE.h>
-#include <LSM6DS3.h>
-#include <Wire.h>
+<div id="app">
+  <header>
+    <h1>Multi-IMU Recorder</h1>
+    <div class="subtitle">3-Channel BLE Streamer &bull; 200 Hz &bull; Right / Left / Torso</div>
+  </header>
 
-// ==================== CONFIG ====================
-// Change this for each sensor: Right, Left, Torso
-const char* DEVICE_NAME = "IMU-Recorder";
+  <div class="global">
+    <button class="btn-s" onclick="startAll()">&#9654; Start All</button>
+    <button class="btn-x" onclick="stopAll()">&#9632; Stop All</button>
+    <button class="btn-c" onclick="downloadAll()" id="btn-dl-all" disabled>&#11015; Download All CSV</button>
+  </div>
 
-const char* SERVICE_UUID      = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
-const char* CHAR_TIME_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-const char* CHAR_CONTROL_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
-const char* CHAR_DATA_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26aa";
+  <div class="sensors" id="sensors"></div>
 
-// Samples per BLE packet (4 = 66 bytes, safe for all MTUs)
-const int SAMPLES_PER_PACKET = 4;
+  <div class="log" id="log"></div>
+</div>
 
-// ==================== LED ====================
-#define LED_PIN LED_BUILTIN
-#define LED_ON  LOW    // Active LOW
-#define LED_OFF HIGH
+<script>
+const SERVICE_UUID      = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+const CHAR_TIME_UUID    = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+const CHAR_CONTROL_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
+const CHAR_DATA_UUID    = 'beb5483e-36e1-4688-b7f5-ea07361b26aa';
+const ACCEL_SCALE = 2.0 / 32768.0;
+const GYRO_SCALE  = 250.0 / 32768.0;
 
-// ==================== IMU ====================
-LSM6DS3 imu(I2C_MODE, 0x6A);
+function beep(freq=880,dur=0.15){
+  try{const c=new(window.AudioContext||window.webkitAudioContext)();
+    const o=c.createOscillator(),g=c.createGain();
+    o.type='sine';o.frequency.value=freq;o.connect(g);g.connect(c.destination);
+    g.gain.setValueAtTime(0.12,c.currentTime);g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+dur);
+    o.start();o.stop(c.currentTime+dur);}catch(e){}
+}
 
-// ==================== TIMING ====================
-const unsigned long SAMPLE_INTERVAL_US = 5000UL;  // 200 Hz
-unsigned long lastSampleUs = 0;
+function log(msg){
+  const el=document.getElementById('log');
+  const d=document.createElement('div');
+  d.textContent=new Date().toLocaleTimeString()+' '+msg;
+  el.appendChild(d);el.scrollTop=el.scrollHeight;
+  while(el.children.length>15)el.removeChild(el.firstChild);
+}
 
-// ==================== SAMPLE BUFFER ====================
-struct Sample {
-  uint32_t relMs;
-  int16_t  ax, ay, az;
-  int16_t  gx, gy, gz;
+class IMUSensor {
+  constructor(id,label,filterName){
+    this.id=id;this.label=label;this.filterName=filterName;
+    this.device=null;this.server=null;this.service=null;
+    this.timeC=null;this.ctrlC=null;this.dataC=null;
+    this.baseEpochMs=0;this.recording=false;
+    this.samples=[];this.lastSeq=-1;this.dropped=0;
+    this.totalPkts=0;this.batchSum=0;this.batchN=0;
+    this.buildUI();
+  }
+
+  buildUI(){
+    const c=document.createElement('div');c.className='card';
+    c.innerHTML=`
+      <h2>${this.label}</h2>
+      <div class="status"><span class="dot" id="dot-${this.id}"></span><span id="txt-${this.id}">Disconnected</span></div>
+      <div class="metrics">
+        <div class="metric" id="m-s-${this.id}"><b id="s-${this.id}">0</b>Samples</div>
+        <div class="metric" id="m-d-${this.id}"><b id="d-${this.id}">0</b>Dropped</div>
+      </div>
+      <button class="btn-c" id="c-${this.id}" onclick="sensors['${this.id}'].connect()">Pair</button>
+      <div class="row">
+        <button class="btn-s" id="st-${this.id}" onclick="sensors['${this.id}'].start()" disabled>Start</button>
+        <button class="btn-x" id="sp-${this.id}" onclick="sensors['${this.id}'].stop()" disabled>Stop</button>
+      </div>
+      <button class="btn-c" id="dl-${this.id}" onclick="sensors['${this.id}'].download()" disabled>Download CSV</button>
+    `;
+    document.getElementById('sensors').appendChild(c);
+  }
+
+  async connect(){
+    try{
+      log(`[${this.label}] Requesting...`);
+      this.device=await navigator.bluetooth.requestDevice({
+        filters:[{name:this.filterName}],
+        optionalServices:[SERVICE_UUID]
+      });
+      this.device.addEventListener('gattserverdisconnected',()=>this.onDisconnect());
+      this.server=await this.device.gatt.connect();
+      try{if(this.server.device?.gatt?.requestConnectionPriority)await this.server.device.gatt.requestConnectionPriority('high');}catch(e){}
+      this.service=await this.server.getPrimaryService(SERVICE_UUID);
+      this.timeC=await this.service.getCharacteristic(CHAR_TIME_UUID);
+      this.ctrlC=await this.service.getCharacteristic(CHAR_CONTROL_UUID);
+      this.dataC=await this.service.getCharacteristic(CHAR_DATA_UUID);
+
+      const nowSec=Math.floor(Date.now()/1000);
+      const b=new ArrayBuffer(4);new DataView(b).setUint32(0,nowSec,true);
+      await this.timeC.writeValue(b);this.baseEpochMs=nowSec*1000;
+
+      await this.dataC.startNotifications();
+      this.dataC.addEventListener('characteristicvaluechanged',e=>this.onData(e));
+      this.updateUI(true);log(`[${this.label}] Connected`);beep(660,0.08);
+    }catch(err){log(`[${this.label}] Error: ${err.message}`);}
+  }
+
+  onDisconnect(){log(`[${this.label}] Disconnected`);this.recording=false;this.updateUI(false);this.device=null;}
+
+  async start(){
+    if(!this.ctrlC)return;this.recording=true;this.samples=[];this.lastSeq=-1;this.dropped=0;this.totalPkts=0;this.batchSum=0;this.batchN=0;this.updateMetrics();
+    await this.ctrlC.writeValue(new Uint8Array([0x01]));beep(1047,0.15);log(`[${this.label}] START`);this.updateUI(true);
+  }
+  async stop(){
+    if(!this.ctrlC)return;this.recording=false;await this.ctrlC.writeValue(new Uint8Array([0x00]));beep(440,0.2);log(`[${this.label}] STOP (${this.samples.length})`);this.updateUI(true);
+  }
+
+  onData(ev){
+    const v=ev.target.value,dv=new DataView(v.buffer);
+    const seq=dv.getUint8(0),cnt=dv.getUint8(1);
+    this.totalPkts++;this.batchSum+=cnt;this.batchN++;
+    if(this.lastSeq>=0){const exp=(this.lastSeq+1)&0xFF;if(seq!==exp)this.dropped+=(seq-exp+256)&0xFF;}
+    this.lastSeq=seq;
+    let o=2;
+    for(let i=0;i<cnt;i++){
+      const rel=dv.getUint32(o,true);o+=4;
+      const ax=dv.getInt16(o,true);o+=2;const ay=dv.getInt16(o,true);o+=2;const az=dv.getInt16(o,true);o+=2;
+      const gx=dv.getInt16(o,true);o+=2;const gy=dv.getInt16(o,true);o+=2;const gz=dv.getInt16(o,true);o+=2;
+      this.samples.push({t:this.baseEpochMs+rel,ax:ax*ACCEL_SCALE,ay:ay*ACCEL_SCALE,az:az*ACCEL_SCALE,gx:gx*GYRO_SCALE,gy:gy*GYRO_SCALE,gz:gz*GYRO_SCALE});
+    }
+    this.updateMetrics();updateGlobalDL();
+  }
+
+  updateMetrics(){
+    document.getElementById(`s-${this.id}`).textContent=this.samples.length.toLocaleString();
+    document.getElementById(`d-${this.id}`).textContent=this.dropped.toLocaleString();
+    const md=document.getElementById(`m-d-${this.id}`);
+    md.classList.toggle('danger',this.dropped>10);md.classList.toggle('warn',this.dropped>0&&this.dropped<=10);
+  }
+
+  updateUI(conn){
+    document.getElementById(`c-${this.id}`).disabled=conn;
+    document.getElementById(`st-${this.id}`).disabled=!conn||this.recording;
+    document.getElementById(`sp-${this.id}`).disabled=!conn||!this.recording;
+    document.getElementById(`dl-${this.id}`).disabled=this.samples.length===0;
+    const dot=document.getElementById(`dot-${this.id}`),txt=document.getElementById(`txt-${this.id}`);
+    dot.className='dot'+(conn?' on':'')+(this.recording?' rec':'');
+    txt.textContent=conn?(this.recording?'Recording':'Connected'):'Disconnected';
+  }
+
+  download(){
+    if(!this.samples.length)return;
+    const hdr='Timestamp_ms,Unix_Time,Sensor_ID,Accel_X_g,Accel_Y_g,Accel_Z_g,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps\n';
+    const rows=this.samples.map(s=>`${s.t},${(s.t/1000).toFixed(3)},${this.label},${s.ax.toFixed(6)},${s.ay.toFixed(6)},${s.az.toFixed(6)},${s.gx.toFixed(4)},${s.gy.toFixed(4)},${s.gz.toFixed(4)}`).join('\n');
+    this.saveBlob(hdr+rows,`imu_${this.id}_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`);
+    beep(880,0.1);
+  }
+
+  saveBlob(text,name){
+    const blob=new Blob([text],{type:'text/csv'}),url=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+  }
+}
+
+const sensors={
+  right: new IMUSensor('right','Right Leg','IMU-Right'),
+  left:  new IMUSensor('left','Left Leg','IMU-Left'),
+  torso: new IMUSensor('torso','Torso','IMU-Torso')
 };
 
-#define BUFFER_SIZE 2048
-Sample sampleBuffer[BUFFER_SIZE];
-volatile uint16_t bufferHead = 0;
-volatile uint16_t bufferTail = 0;
-
-inline int bufferCount() {
-  return (bufferHead - bufferTail + BUFFER_SIZE) % BUFFER_SIZE;
+function startAll(){Object.values(sensors).forEach(s=>s.start());}
+function stopAll(){Object.values(sensors).forEach(s=>s.stop());}
+function updateGlobalDL(){
+  const any=Object.values(sensors).some(s=>s.samples.length>0);
+  document.getElementById('btn-dl-all').disabled=!any;
 }
-inline bool bufferEmpty() {
-  return bufferHead == bufferTail;
-}
-inline bool bufferFull() {
-  return ((bufferHead + 1) % BUFFER_SIZE) == bufferTail;
-}
-
-// ==================== STATE ====================
-volatile bool     recording    = false;
-volatile uint32_t baseEpochMs  = 0;
-volatile uint32_t baseMillis   = 0;
-uint8_t seqNum = 0;
-
-// ==================== BLE ====================
-BLEService imuService(SERVICE_UUID);
-BLECharacteristic timeChar(CHAR_TIME_UUID, BLEWrite, 4);
-BLECharacteristic controlChar(CHAR_CONTROL_UUID, BLEWrite, 1);
-BLECharacteristic dataChar(CHAR_DATA_UUID, BLENotify, 200);
-
-// ==================== FORWARD DECLARATIONS ====================
-void onTimeWritten(BLEDevice central, BLECharacteristic characteristic);
-void onControlWritten(BLEDevice central, BLECharacteristic characteristic);
-void sampleIMU();
-void sendSamples();
-void readIMU(int16_t* ax, int16_t* ay, int16_t* az,
-             int16_t* gx, int16_t* gy, int16_t* gz);
-
-// ==================== SETUP ====================
-void setup() {
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LED_OFF);
-
-  Serial.begin(115200);
-  for (int i = 0; i < 10 && !Serial; i++) delay(100);
-
-  Serial.println("\n=== IMU BLE Recorder (Optimized) ===");
-  Serial.print("Device name: ");
-  Serial.println(DEVICE_NAME);
-
-  Wire.begin();
-  Wire.setClock(400000);
-
-  imu.settings.accelSampleRate = 416;
-  imu.settings.gyroSampleRate  = 416;
-  imu.settings.accelRange      = 2;
-  imu.settings.gyroRange       = 245;
-
-  int imuTries = 0;
-  while (imu.begin() != 0 && imuTries < 5) {
-    Serial.println("IMU init failed, retrying...");
-    digitalWrite(LED_PIN, LED_ON); delay(100);
-    digitalWrite(LED_PIN, LED_OFF); delay(500);
-    imuTries++;
-  }
-
-  if (imuTries >= 5) {
-    Serial.println("IMU FATAL!");
-    while (1) {
-      digitalWrite(LED_PIN, LED_ON); delay(100);
-      digitalWrite(LED_PIN, LED_OFF); delay(100);
-    }
-  }
-
-  // 416 Hz, +/-2g, +/-250 dps
-  imu.writeRegister(LSM6DS3_ACC_GYRO_CTRL1_XL, 0x60);
-  imu.writeRegister(LSM6DS3_ACC_GYRO_CTRL2_G, 0x60);
-
-  Serial.println("IMU ready (burst I2C mode)");
-
-  if (!BLE.begin()) {
-    Serial.println("BLE FATAL!");
-    while (1) {
-      digitalWrite(LED_PIN, LED_ON); delay(50);
-      digitalWrite(LED_PIN, LED_OFF); delay(50);
-    }
-  }
-
-  BLE.setLocalName(DEVICE_NAME);
-  BLE.setDeviceName(DEVICE_NAME);
-  BLE.setAdvertisedService(imuService);
-
-  imuService.addCharacteristic(timeChar);
-  imuService.addCharacteristic(controlChar);
-  imuService.addCharacteristic(dataChar);
-  BLE.addService(imuService);
-
-  uint8_t zero[200] = {0};
-  dataChar.writeValue(zero, 200);
-  timeChar.writeValue((uint32_t)0);
-  controlChar.writeValue((uint8_t)0);
-
-  timeChar.setEventHandler(BLEWritten, onTimeWritten);
-  controlChar.setEventHandler(BLEWritten, onControlWritten);
-
-  BLE.advertise();
-
-  Serial.println("Advertising...");
-  digitalWrite(LED_PIN, LED_ON);   // Solid = ready
+function downloadAll(){
+  let all=[];
+  Object.values(sensors).forEach(s=>{
+    s.samples.forEach(x=>all.push({...x,sid:s.label}));
+  });
+  if(!all.length){log('No data');return;}
+  all.sort((a,b)=>a.t-b.t);
+  const hdr='Timestamp_ms,Unix_Time,Sensor_ID,Accel_X_g,Accel_Y_g,Accel_Z_g,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps\n';
+  const rows=all.map(s=>`${s.t},${(s.t/1000).toFixed(3)},${s.sid},${s.ax.toFixed(6)},${s.ay.toFixed(6)},${s.az.toFixed(6)},${s.gx.toFixed(4)},${s.gy.toFixed(4)},${s.gz.toFixed(4)}`).join('\n');
+  const blob=new Blob([hdr+rows],{type:'text/csv'}),url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download=`imu_all_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+  log(`Downloaded ${all.length} total samples`);beep(880,0.1);
 }
 
-// ==================== MAIN LOOP ====================
-void loop() {
-  BLEDevice central = BLE.central();
-
-  if (central) {
-    Serial.print("Connected: ");
-    Serial.println(central.address());
-
-    recording = false;
-    seqNum = 0;
-    bufferHead = 0;
-    bufferTail = 0;
-
-    while (central.connected()) {
-      unsigned long nowUs = micros();
-
-      // ---- Sample at 200 Hz (reset timer to prevent drift) ----
-      if (nowUs - lastSampleUs >= SAMPLE_INTERVAL_US) {
-        lastSampleUs = nowUs;
-        if (recording) sampleIMU();
-      }
-
-      // ---- Send when a full batch is ready ----
-      // Natural pacing: 4 samples @ 200 Hz => every 20 ms (50 Hz)
-      if (recording && bufferCount() >= SAMPLES_PER_PACKET) {
-        sendSamples();
-      }
-
-      // ---- LED feedback ----
-      if (recording) {
-        digitalWrite(LED_PIN, ((millis() / 250) % 2) ? LED_ON : LED_OFF);
-      }
-
-      BLE.poll();
-    }
-
-    Serial.println("Disconnected");
-    recording = false;
-    digitalWrite(LED_PIN, LED_ON);
-  }
-}
-
-// ==================== BURST I2C READ ====================
-// Reads all 12 bytes (gyro + accel) in ONE transaction.
-// LSM6DS3 registers 0x22..0x2D are contiguous.
-void readIMU(int16_t* ax, int16_t* ay, int16_t* az,
-             int16_t* gx, int16_t* gy, int16_t* gz) {
-  Wire.beginTransmission(0x6A);
-  Wire.write(0x22);               // OUTX_L_G
-  Wire.endTransmission(false);
-  Wire.requestFrom(0x6A, 12);
-
-  uint8_t buf[12];
-  for (int i = 0; i < 12; i++) {
-    buf[i] = Wire.available() ? Wire.read() : 0;
-  }
-
-  *gx = (int16_t)(buf[1] << 8 | buf[0]);
-  *gy = (int16_t)(buf[3] << 8 | buf[2]);
-  *gz = (int16_t)(buf[5] << 8 | buf[4]);
-  *ax = (int16_t)(buf[7] << 8 | buf[6]);
-  *ay = (int16_t)(buf[9] << 8 | buf[8]);
-  *az = (int16_t)(buf[11] << 8 | buf[10]);
-}
-
-// ==================== SAMPLING ====================
-void sampleIMU() {
-  if (bufferFull()) {
-    bufferTail = (bufferTail + 1) % BUFFER_SIZE;  // drop oldest
-  }
-
-  Sample s;
-  s.relMs = (uint32_t)(millis() - baseMillis);
-
-  readIMU(&s.ax, &s.ay, &s.az, &s.gx, &s.gy, &s.gz);
-
-  uint16_t idx = bufferHead;
-  sampleBuffer[idx] = s;
-  bufferHead = (idx + 1) % BUFFER_SIZE;
-}
-
-// ==================== BLE TRANSMISSION ====================
-void sendSamples() {
-  int available = bufferCount();
-  if (available < SAMPLES_PER_PACKET) return;
-
-  int count = (available < SAMPLES_PER_PACKET) ? available : SAMPLES_PER_PACKET;
-  uint8_t packet[2 + count * 16];
-
-  packet[0] = seqNum;
-  packet[1] = count;
-
-  int offset = 2;
-  for (int i = 0; i < count; i++) {
-    uint16_t idx = (bufferTail + i) % BUFFER_SIZE;
-    Sample s = sampleBuffer[idx];
-
-    packet[offset++] = (uint8_t)(s.relMs);
-    packet[offset++] = (uint8_t)(s.relMs >> 8);
-    packet[offset++] = (uint8_t)(s.relMs >> 16);
-    packet[offset++] = (uint8_t)(s.relMs >> 24);
-
-    packet[offset++] = (uint8_t)(s.ax);
-    packet[offset++] = (uint8_t)(s.ax >> 8);
-    packet[offset++] = (uint8_t)(s.ay);
-    packet[offset++] = (uint8_t)(s.ay >> 8);
-    packet[offset++] = (uint8_t)(s.az);
-    packet[offset++] = (uint8_t)(s.az >> 8);
-
-    packet[offset++] = (uint8_t)(s.gx);
-    packet[offset++] = (uint8_t)(s.gx >> 8);
-    packet[offset++] = (uint8_t)(s.gy);
-    packet[offset++] = (uint8_t)(s.gy >> 8);
-    packet[offset++] = (uint8_t)(s.gz);
-    packet[offset++] = (uint8_t)(s.gz >> 8);
-  }
-
-  int packetLen = 2 + count * 16;
-  if (dataChar.writeValue(packet, packetLen)) {
-    seqNum = (seqNum + 1) & 0xFF;
-    bufferTail = (bufferTail + count) % BUFFER_SIZE;
-  }
-  // If TX queue full, retry on next loop iteration
-}
-
-// ==================== BLE EVENT HANDLERS ====================
-void onTimeWritten(BLEDevice central, BLECharacteristic characteristic) {
-  if (characteristic.valueLength() == 4) {
-    const uint8_t* v = characteristic.value();
-    uint32_t epochSec = ((uint32_t)v[0]) |
-                        ((uint32_t)v[1] << 8) |
-                        ((uint32_t)v[2] << 16) |
-                        ((uint32_t)v[3] << 24);
-
-    baseEpochMs = (uint32_t)epochSec * 1000UL;
-    baseMillis  = millis();
-
-    Serial.print("Time synced: ");
-    Serial.println(epochSec);
-  }
-}
-
-void onControlWritten(BLEDevice central, BLECharacteristic characteristic) {
-  if (characteristic.valueLength() == 1) {
-    uint8_t cmd = characteristic.value()[0];
-
-    if (cmd == 0x01) {
-      recording = true;
-      seqNum = 0;
-      bufferHead = 0;
-      bufferTail = 0;
-      lastSampleUs = micros();
-      Serial.println(">>> START");
-
-    } else if (cmd == 0x00) {
-      recording = false;
-      Serial.println(">>> STOP");
-      Serial.print("Buffered: ");
-      Serial.println(bufferCount());
-    }
-  }
-}
+if(!navigator.bluetooth){log('Web Bluetooth not supported. Use Chrome/Edge.');alert('Use Chrome or Edge with Web Bluetooth support.');}
+</script>
+</body>
+</html>
