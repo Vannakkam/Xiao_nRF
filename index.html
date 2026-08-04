@@ -1,336 +1,206 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BCMCH Gait IMU Recorder</title>
-<style>
-  :root {
-    --bg: #0f172a; --panel: #1e293b; --text: #e2e8f0;
-    --accent: #38bdf8; --ok: #22c55e; --warn: #f59e0b; --err: #ef4444;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; font-family: system-ui, -apple-system, sans-serif;
-    background: var(--bg); color: var(--text); line-height: 1.5;
-  }
-  .container { max-width: 900px; margin: 0 auto; padding: 1.5rem; }
-  h1 { margin: 0 0 0.5rem; font-size: 1.4rem; }
-  .subtitle { color: #94a3b8; font-size: 0.9rem; margin-bottom: 1.2rem; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.8rem; margin-bottom: 1.2rem; }
-  .card {
-    background: var(--panel); border-radius: 0.6rem; padding: 1rem;
-    text-align: center; border: 1px solid #334155;
-  }
-  .card .value { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
-  .card .label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
-  .card.warn .value { color: var(--warn); }
-  .card.err  .value { color: var(--err); }
-  .card.ok   .value { color: var(--ok); }
-  .btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    gap: 0.4rem; padding: 0.6rem 1.2rem; border: none; border-radius: 0.4rem;
-    font-size: 0.95rem; font-weight: 600; cursor: pointer; color: #fff;
-    transition: opacity 0.15s;
-  }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .btn-primary { background: var(--accent); color: #0f172a; }
-  .btn-success { background: var(--ok); }
-  .btn-danger  { background: var(--err); }
-  .btn-secondary { background: #475569; }
-  .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
-  .log {
-    background: #020617; border: 1px solid #1e293b; border-radius: 0.5rem;
-    padding: 0.8rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.78rem; max-height: 240px; overflow-y: auto; white-space: pre-wrap;
-    color: #cbd5e1; line-height: 1.4;
-  }
-  .log .ts { color: #64748b; }
-  .log .ok { color: var(--ok); }
-  .log .warn { color: var(--warn); }
-  .log .err { color: var(--err); }
-  .hidden { display: none !important; }
-  .status-dot {
-    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
-    background: var(--err); margin-right: 0.4rem;
-  }
-  .status-dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .status-dot.busy { background: var(--warn); }
-  .hint { font-size: 0.8rem; color: #64748b; margin-top: 0.4rem; }
-</style>
-<base target="_blank">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XIAO nRF Sense BLE IMU Streamer</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f7f6; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 800px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        h2 { margin-top: 0; color: #2c3e50; }
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; margin: 20px 0; }
+        button { padding: 10px 18px; font-size: 14px; font-weight: 600; border: none; border-radius: 6px; cursor: pointer; color: white; transition: background 0.2s; }
+        #connectBtn { background: #3498db; }
+        #connectBtn:hover { background: #2980b9; }
+        #startBtn { background: #2ecc71; }
+        #startBtn:hover { background: #27ae60; }
+        #stopBtn { background: #e74c3c; }
+        #stopBtn:hover { background: #c0392b; }
+        #downloadBtn { background: #9b59b6; }
+        #downloadBtn:hover { background: #8e44ad; }
+        button:disabled { background: #bdc3c7; cursor: not-allowed; }
+        .status { padding: 12px; background: #ecf0f1; border-radius: 6px; font-family: monospace; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; font-size: 13px; }
+        th { background-color: #f8f9fa; }
+        .table-container { max-height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 6px; }
+    </style>
 </head>
 <body>
+
 <div class="container">
-  <h1>🦿 BCMCH Gait IMU Recorder</h1>
-  <div class="subtitle">Web Bluetooth receiver for Xiao nRF52840 Sense (LSM6DS3)</div>
+    <h2>XIAO nRF Sense IMU Streamer</h2>
+    <div class="status" id="statusText">Status: Disconnected</div>
 
-  <div class="grid">
-    <div class="card" id="card-rate"><div class="value" id="disp-rate">—</div><div class="label">Rate (Hz)</div></div>
-    <div class="card" id="card-samples"><div class="value" id="disp-samples">0</div><div class="label">Samples</div></div>
-    <div class="card" id="card-gaps"><div class="value" id="disp-gaps">0</div><div class="label">Seq Gaps</div></div>
-    <div class="card" id="card-pkts"><div class="value" id="disp-pkts">0</div><div class="label">Packets</div></div>
-    <div class="card"><div class="value" id="disp-buf">0</div><div class="label">Buffer</div></div>
-    <div class="card"><div class="value" id="disp-time">—</div><div class="label">Duration</div></div>
-  </div>
+    <div class="btn-group">
+        <button id="connectBtn" onclick="toggleConnection()">Connect BLE</button>
+        <button id="startBtn" onclick="startStreaming()" disabled>Start Stream</button>
+        <button id="stopBtn" onclick="stopStreaming()" disabled>Stop Stream</button>
+        <button id="downloadBtn" onclick="downloadCSV()" disabled>Download CSV</button>
+    </div>
 
-  <div class="btn-row">
-    <button class="btn btn-primary" id="btn-scan" onclick="scan()">
-      <span class="status-dot" id="status-dot"></span>Scan & Connect
-    </button>
-    <button class="btn btn-success" id="btn-start" onclick="startRec()" disabled>▶ Start</button>
-    <button class="btn btn-danger"  id="btn-stop"  onclick="stopRec()"  disabled>⏹ Stop</button>
-    <button class="btn btn-secondary" id="btn-clear" onclick="clearLog()">Clear Log</button>
-    <button class="btn btn-secondary" id="btn-csv"   onclick="downloadCSV()" disabled>⬇ CSV</button>
-  </div>
-
-  <div class="log" id="log">Ready. Click "Scan & Connect" to find a BCMCH_GAIT device.</div>
-  <div class="hint">Requires Chrome/Edge on Windows, macOS, Android, or Chromebook with Bluetooth LE.</div>
+    <h3>Live Data Stream (<span id="sampleCount">0</span> samples collected)</h3>
+    <div class="table-container">
+        <table id="dataTable">
+            <thead>
+                <tr>
+                    <th>Unix Epoch (s)</th>
+                    <th>Offset (ms)</th>
+                    <th>Accel X (g)</th>
+                    <th>Accel Y (g)</th>
+                    <th>Accel Z (g)</th>
+                    <th>Gyro X (dps)</th>
+                    <th>Gyro Y (dps)</th>
+                    <th>Gyro Z (dps)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Live rows populate here -->
+            </tbody>
+        </table>
+    </div>
 </div>
 
 <script>
-// ---------------------------------------------------------------------------
-// BLE UUIDs (must match Arduino sketch)
-// ---------------------------------------------------------------------------
-const SERVICE_UUID      = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
-const CHAR_TIME_UUID    = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
-const CHAR_CONTROL_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
-const CHAR_DATA_UUID    = 'beb5483e-36e1-4688-b7f5-ea07361b26aa';
+    const SERVICE_UUID = "19b10000-e8f2-537e-4f6c-d104768a1214";
+    const CHAR_DATA_UUID = "19b10001-e8f2-537e-4f6c-d104768a1214";
+    const CHAR_TIME_UUID = "19b10002-e8f2-537e-4f6c-d104768a1214";
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-let device = null;
-let server = null;
-let dataChar = null;
-let controlChar = null;
-let timeChar = null;
+    let bluetoothDevice, gattServer, imuService, dataChar, timeChar;
+    let recordedData = [];
+    let isStreaming = false;
 
-let isRecording = false;
-let baseEpochMs = 0;
-let startTimeMs = 0;
-let samples = [];
-let packetCount = 0;
-let lastSeq = null;
-let seqGaps = 0;
-let lastRateTime = 0;
-let rateSamples = 0;
+    const statusText = document.getElementById("statusText");
+    const connectBtn = document.getElementById("connectBtn");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const sampleCountEl = document.getElementById("sampleCount");
+    const dataTableBody = document.querySelector("#dataTable tbody");
 
-// LSM6DS3 conversion factors
-const ACCEL_SCALE = 2.0  / 32768.0;   // ±2 g
-const GYRO_SCALE  = 0.00875;          // ±250 dps (8.75 mdps/LSB)
+    async function toggleConnection() {
+        try {
+            if (!bluetoothDevice || !bluetoothDevice.gatt.connected) {
+                statusText.innerText = "Status: Scanning & Connecting...";
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: "XIAO-IMU" }],
+                    optionalServices: [SERVICE_UUID]
+                });
 
-// ---------------------------------------------------------------------------
-// UI helpers
-// ---------------------------------------------------------------------------
-const $ = id => document.getElementById(id);
-function log(msg, cls='') {
-  const ts = new Date().toLocaleTimeString('en-GB',{hour12:false});
-  const line = `<span class="ts">[${ts}]</span> <span class="${cls}">${msg}</span>`;
-  $('log').innerHTML += '\n' + line;
-  $('log').scrollTop = $('log').scrollHeight;
-}
-function clearLog() { $('log').textContent = ''; }
-function setDot(state) {
-  const d = $('status-dot');
-  d.className = 'status-dot' + (state ? ' ' + state : '');
-}
-function setBtn(id, en) { $(id).disabled = !en; }
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+                gattServer = await bluetoothDevice.gatt.connect();
+                imuService = await gattServer.getPrimaryService(SERVICE_UUID);
+                dataChar = await imuService.getCharacteristic(CHAR_DATA_UUID);
+                timeChar = await imuService.getCharacteristic(CHAR_TIME_UUID);
 
-// ---------------------------------------------------------------------------
-// BLE Scan & Connect
-// ---------------------------------------------------------------------------
-async function scan() {
-  if (!navigator.bluetooth) { log('Web Bluetooth not supported on this browser.', 'err'); return; }
-  try {
-    log('Scanning for BCMCH_GAIT-* ...');
-    device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: 'BCMCH_GAIT' }],
-      optionalServices: [SERVICE_UUID]
-    });
-    log(`Found: ${device.name}`);
-    setDot('busy');
-
-    device.addEventListener('gattserverdisconnected', onDisconnect);
-    server = await device.gatt.connect();
-    log('GATT connected.');
-
-    const service = await server.getPrimaryService(SERVICE_UUID);
-    timeChar    = await service.getCharacteristic(CHAR_TIME_UUID);
-    controlChar = await service.getCharacteristic(CHAR_CONTROL_UUID);
-    dataChar    = await service.getCharacteristic(CHAR_DATA_UUID);
-
-    await dataChar.startNotifications();
-    dataChar.addEventListener('characteristicvaluechanged', onData);
-
-    log('Notifications started. Ready to record.', 'ok');
-    setDot('on');
-    setBtn('btn-start', true);
-    setBtn('btn-scan', false);
-  } catch (e) {
-    log('Scan/Connect failed: ' + e.message, 'err');
-    setDot('');
-  }
-}
-
-function onDisconnect() {
-  log('Device disconnected.', 'warn');
-  isRecording = false;
-  setDot('');
-  setBtn('btn-scan', true);
-  setBtn('btn-start', false);
-  setBtn('btn-stop', false);
-  setBtn('btn-csv', samples.length > 0);
-  device = null;
-}
-
-// ---------------------------------------------------------------------------
-// Control
-// ---------------------------------------------------------------------------
-async function startRec() {
-  if (!controlChar) return;
-  samples = [];
-  packetCount = 0;
-  lastSeq = null;
-  seqGaps = 0;
-  baseEpochMs = Date.now();
-  startTimeMs = performance.now();
-
-  // Send epoch time (seconds since Unix epoch, uint32 LE)
-  const epochSec = Math.floor(baseEpochMs / 1000);
-  const buf = new ArrayBuffer(4);
-  const view = new DataView(buf);
-  view.setUint32(0, epochSec, true);
-  await timeChar.writeValue(buf);
-  log(`Time sync: ${epochSec}`);
-
-  // Send START command (0x01)
-  await controlChar.writeValue(Uint8Array.of(0x01));
-  isRecording = true;
-  log('=== Recording STARTED ===', 'ok');
-  setBtn('btn-start', false);
-  setBtn('btn-stop', true);
-  setBtn('btn-csv', false);
-}
-
-async function stopRec() {
-  if (!controlChar) return;
-  await controlChar.writeValue(Uint8Array.of(0x00));
-  isRecording = false;
-  log('=== Recording STOPPED ===', 'warn');
-  setBtn('btn-start', true);
-  setBtn('btn-stop', false);
-  setBtn('btn-csv', samples.length > 0);
-}
-
-// ---------------------------------------------------------------------------
-// Data parsing
-// ---------------------------------------------------------------------------
-function onData(event) {
-  const value = event.target.value;
-  const bytes = new Uint8Array(value.buffer);
-  if (bytes.length < 2) return;
-
-  const seq  = bytes[0];
-  const count = bytes[1];
-  const expectedLen = 2 + count * 16;
-  if (bytes.length < expectedLen) {
-    log(`Short packet: got ${bytes.length}, expected ${expectedLen}`, 'warn');
-    return;
-  }
-
-  // Sequence gap detection
-  if (lastSeq !== null) {
-    const expectedSeq = (lastSeq + 1) & 0xFF;
-    if (seq !== expectedSeq) {
-      const missed = (seq - expectedSeq + 256) & 0xFF;
-      seqGaps += missed;
-      log(`Seq gap: expected ${expectedSeq}, got ${seq} (missed ~${missed} packet(s))`, 'warn');
+                statusText.innerText = "Status: Connected to XIAO-IMU";
+                connectBtn.innerText = "Disconnect BLE";
+                connectBtn.style.background = "#e74c3c";
+                startBtn.disabled = false;
+            } else {
+                await bluetoothDevice.gatt.disconnect();
+            }
+        } catch (error) {
+            console.error(error);
+            statusText.innerText = "Status: Connection failed - " + error;
+        }
     }
-  }
-  lastSeq = seq;
-  packetCount++;
 
-  let offset = 2;
-  for (let i = 0; i < count; i++) {
-    const relMs = (bytes[offset]) | (bytes[offset+1] << 8) | (bytes[offset+2] << 16) | (bytes[offset+3] << 24);
-    offset += 4;
+    function onDisconnected() {
+        statusText.innerText = "Status: Disconnected";
+        connectBtn.innerText = "Connect BLE";
+        connectBtn.style.background = "#3498db";
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+        isStreaming = false;
+    }
 
-    const axRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const ayRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const azRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const gxRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const gyRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const gzRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
+    async function startStreaming() {
+        if (!timeChar || !dataChar) return;
+        try {
+            recordedData = [];
+            dataTableBody.innerHTML = "";
+            sampleCountEl.innerText = "0";
 
-    // Sign-extend 16-bit
-    const sx = v => (v & 0x8000) ? v - 0x10000 : v;
+            // Transmit current Unix Epoch timestamp to synchronize MCU
+            const currentEpochSec = Math.floor(Date.now() / 1000);
+            const buffer = new ArrayBuffer(4);
+            new DataView(buffer).setUint32(0, currentEpochSec, true);
+            await timeChar.writeValue(buffer);
 
-    const tsMs = baseEpochMs + relMs;
-    samples.push({
-      Timestamp_ms: tsMs,
-      Unix_Time: tsMs / 1000.0,
-      Sensor_ID: device ? device.name.replace('BCMCH_GAIT-', '') : 'Unknown',
-      Accel_X_g: sx(axRaw) * ACCEL_SCALE,
-      Accel_Y_g: sx(ayRaw) * ACCEL_SCALE,
-      Accel_Z_g: sx(azRaw) * ACCEL_SCALE,
-      Gyro_X_dps: sx(gxRaw) * GYRO_SCALE,
-      Gyro_Y_dps: sx(gyRaw) * GYRO_SCALE,
-      Gyro_Z_dps: sx(gzRaw) * GYRO_SCALE,
-    });
-  }
+            // Listen for IMU notifications
+            await dataChar.startNotifications();
+            dataChar.addEventListener('characteristicvaluechanged', handleIMUPacket);
 
-  // Rate estimation (last 1 second)
-  rateSamples += count;
-  const now = performance.now();
-  if (now - lastRateTime >= 1000) {
-    const hz = Math.round((rateSamples * 1000) / (now - lastRateTime));
-    $('disp-rate').textContent = hz;
-    if (hz >= 190) $('card-rate').className = 'card ok';
-    else if (hz >= 150) $('card-rate').className = 'card warn';
-    else $('card-rate').className = 'card err';
-    rateSamples = 0;
-    lastRateTime = now;
-  }
+            isStreaming = true;
+            statusText.innerText = "Status: Streaming IMU data...";
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            downloadBtn.disabled = true;
+        } catch (error) {
+            console.error(error);
+            statusText.innerText = "Status: Error starting stream - " + error;
+        }
+    }
 
-  // Update UI
-  $('disp-samples').textContent = samples.length.toLocaleString();
-  $('disp-pkts').textContent = packetCount.toLocaleString();
-  $('disp-gaps').textContent = seqGaps;
-  $('disp-buf').textContent = count;
-  if (startTimeMs) {
-    const dur = ((performance.now() - startTimeMs) / 1000).toFixed(1);
-    $('disp-time').textContent = dur + ' s';
-  }
-}
+    async function stopStreaming() {
+        if (dataChar && isStreaming) {
+            await dataChar.stopNotifications();
+            dataChar.removeEventListener('characteristicvaluechanged', handleIMUPacket);
+        }
+        isStreaming = false;
+        statusText.innerText = "Status: Stream stopped.";
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        if (recordedData.length > 0) downloadBtn.disabled = false;
+    }
 
-// ---------------------------------------------------------------------------
-// CSV Export (matches uploaded format)
-// ---------------------------------------------------------------------------
-function downloadCSV() {
-  if (samples.length === 0) return;
-  const header = 'Timestamp_ms,Unix_Time,Sensor_ID,Accel_X_g,Accel_Y_g,Accel_Z_g,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps';
-  const rows = samples.map(s => [
-    s.Timestamp_ms,
-    s.Unix_Time.toFixed(3),
-    s.Sensor_ID,
-    s.Accel_X_g.toFixed(6),
-    s.Accel_Y_g.toFixed(6),
-    s.Accel_Z_g.toFixed(6),
-    s.Gyro_X_dps.toFixed(4),
-    s.Gyro_Y_dps.toFixed(4),
-    s.Gyro_Z_dps.toFixed(4),
-  ].join(','));
-  const csv = [header, ...rows].join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `imu_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-  log(`Downloaded ${samples.length} rows.`, 'ok');
-}
+    function handleIMUPacket(event) {
+        const value = event.target.value;
+        // Unpack packet binary structure matching C++ struct
+        const baseEpoch = value.getUint32(0, true);
+        
+        // 2 samples per packet payload
+        for (let i = 0; i < 2; i++) {
+            let offset = 4 + (i * 16);
+            if (offset >= value.byteLength) break;
+
+            let timestamp_ms = value.getUint32(offset, true);
+            let ax = value.getInt16(offset + 4, true) / 1000.0;
+            let ay = value.getInt16(offset + 6, true) / 1000.0;
+            let az = value.getInt16(offset + 8, true) / 1000.0;
+            let gx = value.getInt16(offset + 10, true) / 10.0;
+            let gy = value.getInt16(offset + 12, true) / 10.0;
+            let gz = value.getInt16(offset + 14, true) / 10.0;
+
+            const rowData = { baseEpoch, timestamp_ms, ax, ay, az, gx, gy, gz };
+            recordedData.push(rowData);
+
+            // Update UI Table (keep last 50 entries visible for performance)
+            if (dataTableBody.rows.length > 50) dataTableBody.deleteRow(-1);
+            let row = dataTableBody.insertRow(0);
+            row.innerHTML = `<td>${baseEpoch}</td><td>${timestamp_ms}</td><td>${ax.toFixed(3)}</td><td>${ay.toFixed(3)}</td><td>${az.toFixed(3)}</td><td>${gx.toFixed(2)}</td><td>${gy.toFixed(2)}</td><td>${gz.toFixed(2)}</td>`;
+            sampleCountEl.innerText = recordedData.length;
+        }
+    }
+
+    function downloadCSV() {
+        if (recordedData.length === 0) return;
+        let csvContent = "data:text/csv;charset=utf-8,Unix_Epoch_Sec,Timestamp_ms,Accel_X_g,Accel_Y_g,Accel_Z_g,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps\r\n";
+        
+        recordedData.forEach(row => {
+            csvContent += `${row.baseEpoch},${row.timestamp_ms},${row.ax},${row.ay},${row.az},${row.gx},${row.gy},${row.gz}\r\n`;
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `xiao_imu_${Date.now()}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
 </script>
+
 </body>
 </html>
