@@ -2,7 +2,10 @@
  * IMU_BLE_Recorder_Optimized.ino
  * 
  * Xiao nRF52840 Sense — BLE IMU Streamer (mbed core)
- * Batches 4 samples/packet to eliminate packet loss
+ * Optimizations: burst I2C read, threshold-based send, no timer drift
+ * 
+ * For multi-sensor setup, change DEVICE_NAME to:
+ *   "IMU-Right", "IMU-Left", or "IMU-Torso"
  * 
  * Board: Seeed XIAO BLE Sense - nRF52840 (mbed-enabled)
  * Libraries: ArduinoBLE, Seeed Arduino LSM6DS3
@@ -12,13 +15,17 @@
 #include <LSM6DS3.h>
 #include <Wire.h>
 
-// ==================== BLE UUIDs ====================
+// ==================== CONFIG ====================
+// Change this for each sensor: Right, Left, Torso
+const char* DEVICE_NAME = "IMU-Recorder";
+
 const char* SERVICE_UUID      = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 const char* CHAR_TIME_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 const char* CHAR_CONTROL_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9";
 const char* CHAR_DATA_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26aa";
 
-const char* DEVICE_NAME = "IMU-Recorder";
+// Samples per BLE packet (4 = 66 bytes, safe for all MTUs)
+const int SAMPLES_PER_PACKET = 4;
 
 // ==================== LED ====================
 #define LED_PIN LED_BUILTIN
@@ -28,48 +35,53 @@ const char* DEVICE_NAME = "IMU-Recorder";
 // ==================== IMU ====================
 LSM6DS3 imu(I2C_MODE, 0x6A);
 
-// ==================== Timing ====================
-const unsigned long SAMPLE_INTERVAL_US = 5000UL;   // 200 Hz sample
-const unsigned long SEND_INTERVAL_US   = 20000UL;  // 50 Hz send (every 20 ms)
+// ==================== TIMING ====================
+const unsigned long SAMPLE_INTERVAL_US = 5000UL;  // 200 Hz
 unsigned long lastSampleUs = 0;
-unsigned long lastSendUs   = 0;
 
-// ==================== Sample Buffer ====================
+// ==================== SAMPLE BUFFER ====================
 struct Sample {
   uint32_t relMs;
   int16_t  ax, ay, az;
   int16_t  gx, gy, gz;
 };
 
-#define BUFFER_SIZE 1024   // 5 seconds @ 200 Hz
+#define BUFFER_SIZE 2048
 Sample sampleBuffer[BUFFER_SIZE];
 volatile uint16_t bufferHead = 0;
 volatile uint16_t bufferTail = 0;
 
-inline int bufferCount() { return (bufferHead - bufferTail + BUFFER_SIZE) % BUFFER_SIZE; }
-inline bool bufferEmpty() { return bufferHead == bufferTail; }
-inline bool bufferFull()  { return ((bufferHead + 1) % BUFFER_SIZE) == bufferTail; }
+inline int bufferCount() {
+  return (bufferHead - bufferTail + BUFFER_SIZE) % BUFFER_SIZE;
+}
+inline bool bufferEmpty() {
+  return bufferHead == bufferTail;
+}
+inline bool bufferFull() {
+  return ((bufferHead + 1) % BUFFER_SIZE) == bufferTail;
+}
 
-// ==================== State ====================
+// ==================== STATE ====================
 volatile bool     recording    = false;
 volatile uint32_t baseEpochMs  = 0;
 volatile uint32_t baseMillis   = 0;
 uint8_t seqNum = 0;
 
-// ==================== BLE Objects ====================
+// ==================== BLE ====================
 BLEService imuService(SERVICE_UUID);
 BLECharacteristic timeChar(CHAR_TIME_UUID, BLEWrite, 4);
 BLECharacteristic controlChar(CHAR_CONTROL_UUID, BLEWrite, 1);
-// Size 200 encourages the browser to negotiate a larger MTU
 BLECharacteristic dataChar(CHAR_DATA_UUID, BLENotify, 200);
 
-// ==================== Forward Declarations ====================
+// ==================== FORWARD DECLARATIONS ====================
 void onTimeWritten(BLEDevice central, BLECharacteristic characteristic);
 void onControlWritten(BLEDevice central, BLECharacteristic characteristic);
 void sampleIMU();
 void sendSamples();
+void readIMU(int16_t* ax, int16_t* ay, int16_t* az,
+             int16_t* gx, int16_t* gy, int16_t* gz);
 
-// ==================== Setup ====================
+// ==================== SETUP ====================
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LED_OFF);
@@ -77,7 +89,9 @@ void setup() {
   Serial.begin(115200);
   for (int i = 0; i < 10 && !Serial; i++) delay(100);
 
-  Serial.println("=== IMU BLE Recorder (Optimized) ===");
+  Serial.println("\n=== IMU BLE Recorder (Optimized) ===");
+  Serial.print("Device name: ");
+  Serial.println(DEVICE_NAME);
 
   Wire.begin();
   Wire.setClock(400000);
@@ -90,24 +104,31 @@ void setup() {
   int imuTries = 0;
   while (imu.begin() != 0 && imuTries < 5) {
     Serial.println("IMU init failed, retrying...");
-    digitalWrite(LED_PIN, LED_ON); delay(100); digitalWrite(LED_PIN, LED_OFF);
-    delay(500);
+    digitalWrite(LED_PIN, LED_ON); delay(100);
+    digitalWrite(LED_PIN, LED_OFF); delay(500);
     imuTries++;
   }
 
   if (imuTries >= 5) {
-    Serial.println("IMU init failed permanently!");
-    while (1) { digitalWrite(LED_PIN, LED_ON); delay(100); digitalWrite(LED_PIN, LED_OFF); delay(100); }
+    Serial.println("IMU FATAL!");
+    while (1) {
+      digitalWrite(LED_PIN, LED_ON); delay(100);
+      digitalWrite(LED_PIN, LED_OFF); delay(100);
+    }
   }
 
+  // 416 Hz, +/-2g, +/-250 dps
   imu.writeRegister(LSM6DS3_ACC_GYRO_CTRL1_XL, 0x60);
   imu.writeRegister(LSM6DS3_ACC_GYRO_CTRL2_G, 0x60);
 
-  Serial.println("IMU ready");
+  Serial.println("IMU ready (burst I2C mode)");
 
   if (!BLE.begin()) {
-    Serial.println("BLE init failed!");
-    while (1) { digitalWrite(LED_PIN, LED_ON); delay(50); digitalWrite(LED_PIN, LED_OFF); delay(50); }
+    Serial.println("BLE FATAL!");
+    while (1) {
+      digitalWrite(LED_PIN, LED_ON); delay(50);
+      digitalWrite(LED_PIN, LED_OFF); delay(50);
+    }
   }
 
   BLE.setLocalName(DEVICE_NAME);
@@ -129,11 +150,11 @@ void setup() {
 
   BLE.advertise();
 
-  Serial.println("Advertising as 'IMU-Recorder'");
-  digitalWrite(LED_PIN, LED_ON);
+  Serial.println("Advertising...");
+  digitalWrite(LED_PIN, LED_ON);   // Solid = ready
 }
 
-// ==================== Main Loop ====================
+// ==================== MAIN LOOP ====================
 void loop() {
   BLEDevice central = BLE.central();
 
@@ -149,19 +170,19 @@ void loop() {
     while (central.connected()) {
       unsigned long nowUs = micros();
 
-      // Sample IMU at 200 Hz
-      if ((long)(nowUs - lastSampleUs) >= (long)SAMPLE_INTERVAL_US) {
-        lastSampleUs += SAMPLE_INTERVAL_US;
+      // ---- Sample at 200 Hz (reset timer to prevent drift) ----
+      if (nowUs - lastSampleUs >= SAMPLE_INTERVAL_US) {
+        lastSampleUs = nowUs;
         if (recording) sampleIMU();
       }
 
-      // Send batched packet at 50 Hz (every 20 ms)
-      if (recording && ((long)(nowUs - lastSendUs) >= (long)SEND_INTERVAL_US)) {
-        lastSendUs += SEND_INTERVAL_US;
+      // ---- Send when a full batch is ready ----
+      // Natural pacing: 4 samples @ 200 Hz => every 20 ms (50 Hz)
+      if (recording && bufferCount() >= SAMPLES_PER_PACKET) {
         sendSamples();
       }
 
-      // LED feedback
+      // ---- LED feedback ----
       if (recording) {
         digitalWrite(LED_PIN, ((millis() / 250) % 2) ? LED_ON : LED_OFF);
       }
@@ -175,34 +196,51 @@ void loop() {
   }
 }
 
-// ==================== IMU Sampling ====================
+// ==================== BURST I2C READ ====================
+// Reads all 12 bytes (gyro + accel) in ONE transaction.
+// LSM6DS3 registers 0x22..0x2D are contiguous.
+void readIMU(int16_t* ax, int16_t* ay, int16_t* az,
+             int16_t* gx, int16_t* gy, int16_t* gz) {
+  Wire.beginTransmission(0x6A);
+  Wire.write(0x22);               // OUTX_L_G
+  Wire.endTransmission(false);
+  Wire.requestFrom(0x6A, 12);
+
+  uint8_t buf[12];
+  for (int i = 0; i < 12; i++) {
+    buf[i] = Wire.available() ? Wire.read() : 0;
+  }
+
+  *gx = (int16_t)(buf[1] << 8 | buf[0]);
+  *gy = (int16_t)(buf[3] << 8 | buf[2]);
+  *gz = (int16_t)(buf[5] << 8 | buf[4]);
+  *ax = (int16_t)(buf[7] << 8 | buf[6]);
+  *ay = (int16_t)(buf[9] << 8 | buf[8]);
+  *az = (int16_t)(buf[11] << 8 | buf[10]);
+}
+
+// ==================== SAMPLING ====================
 void sampleIMU() {
   if (bufferFull()) {
-    bufferTail = (bufferTail + 1) % BUFFER_SIZE; // drop oldest
+    bufferTail = (bufferTail + 1) % BUFFER_SIZE;  // drop oldest
   }
 
   Sample s;
   s.relMs = (uint32_t)(millis() - baseMillis);
 
-  s.ax = imu.readRawAccelX();
-  s.ay = imu.readRawAccelY();
-  s.az = imu.readRawAccelZ();
-  s.gx = imu.readRawGyroX();
-  s.gy = imu.readRawGyroY();
-  s.gz = imu.readRawGyroZ();
+  readIMU(&s.ax, &s.ay, &s.az, &s.gx, &s.gy, &s.gz);
 
   uint16_t idx = bufferHead;
   sampleBuffer[idx] = s;
   bufferHead = (idx + 1) % BUFFER_SIZE;
 }
 
-// ==================== BLE Transmission ====================
+// ==================== BLE TRANSMISSION ====================
 void sendSamples() {
-  const int MAX_PER_PACKET = 4;  // 4 samples = 66 bytes payload
   int available = bufferCount();
-  if (available == 0) return;
+  if (available < SAMPLES_PER_PACKET) return;
 
-  int count = available < MAX_PER_PACKET ? available : MAX_PER_PACKET;
+  int count = (available < SAMPLES_PER_PACKET) ? available : SAMPLES_PER_PACKET;
   uint8_t packet[2 + count * 16];
 
   packet[0] = seqNum;
@@ -235,16 +273,13 @@ void sendSamples() {
 
   int packetLen = 2 + count * 16;
   if (dataChar.writeValue(packet, packetLen)) {
-    // Only consume data on successful transmit
     seqNum = (seqNum + 1) & 0xFF;
     bufferTail = (bufferTail + count) % BUFFER_SIZE;
-  } else {
-    // BLE TX queue full — retry next 20 ms window
-    Serial.println("TX fail");
   }
+  // If TX queue full, retry on next loop iteration
 }
 
-// ==================== BLE Event Handlers ====================
+// ==================== BLE EVENT HANDLERS ====================
 void onTimeWritten(BLEDevice central, BLECharacteristic characteristic) {
   if (characteristic.valueLength() == 4) {
     const uint8_t* v = characteristic.value();
@@ -256,7 +291,7 @@ void onTimeWritten(BLEDevice central, BLECharacteristic characteristic) {
     baseEpochMs = (uint32_t)epochSec * 1000UL;
     baseMillis  = millis();
 
-    Serial.print("Time synced. Epoch: ");
+    Serial.print("Time synced: ");
     Serial.println(epochSec);
   }
 }
@@ -271,13 +306,12 @@ void onControlWritten(BLEDevice central, BLECharacteristic characteristic) {
       bufferHead = 0;
       bufferTail = 0;
       lastSampleUs = micros();
-      lastSendUs   = micros();
-      Serial.println(">>> Recording STARTED");
+      Serial.println(">>> START");
 
     } else if (cmd == 0x00) {
       recording = false;
-      Serial.println(">>> Recording STOPPED");
-      Serial.print("    Buffered samples: ");
+      Serial.println(">>> STOP");
+      Serial.print("Buffered: ");
       Serial.println(bufferCount());
     }
   }
