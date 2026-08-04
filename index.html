@@ -197,9 +197,9 @@ class IMUSensor {
 }
 
 const sensors={
-  right: new BCMCH_GAIT('right','Right Leg','IMU-Right'),
-  left:  new BCMCH_GAIT('left','Left Leg','IMU-Left'),
-  torso: new BCMCH_GAIT('torso','Torso','IMU-Torso')
+  right: new BCMCH_GAIT('right','Right Leg','BCMCH_GAIT-Right'),
+  left:  new BCMCH_GAIT('left','Left Leg','BCMCH_GAIT-Left'),
+  torso: new BCMCH_GAIT('torso','Torso','BCMCH_GAIT-Torso')
 };
 
 function startAll(){Object.values(sensors).forEach(s=>s.start());}
