@@ -6,16 +6,24 @@
     <title>Gait Analysis Streamer (Zero-Loss)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
     <style>
-        body { font-family: sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; background: #f4f4f9; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; background-color: #f4f4f9; }
+        h1 { color: #333; text-align: center; }
         .controls { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
-        button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
-        .btn-pair { background: #007bff; color: white; } .btn-start { background: #28a745; color: white; }
-        .btn-stop { background: #dc3545; color: white; } .btn-reset { background: #ffc107; color: black; }
-        .btn-dl { background: #6c757d; color: white; } .btn-copy { background: #17a2b8; color: white; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
+        button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .btn-pair { background-color: #007bff; color: white; }
+        .btn-start { background-color: #28a745; color: white; }
+        .btn-stop { background-color: #dc3545; color: white; }
+        .btn-reset { background-color: #ffc107; color: black; }
+        .btn-dl { background-color: #6c757d; color: white; }
+        .btn-copy { background-color: #17a2b8; color: white; }
+        button:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        
         .status-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .sensor-card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-left: 5px solid #ccc; }
-        .sensor-card.active { border-left-color: #28a745; background: #f8fff8; }
+        .sensor-card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-left: 5px solid #ccc; transition: 0.3s; }
+        .sensor-card.active { border-left-color: #28a745; background-color: #f8fff8; }
+        .sensor-card h3 { margin-top: 0; }
+        
         #log { background: #222; color: #0f0; padding: 10px; border-radius: 5px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9em; }
     </style>
 </head>
@@ -41,11 +49,15 @@
         const DATA_CHAR_UUID = '19b10001-e8f2-537e-4f6c-d104768a1214';
         const CTRL_CHAR_UUID = '19b10002-e8f2-537e-4f6c-d104768a1214';
         const LABELS = { 1: "Right Leg", 2: "Left Leg", 3: "Torso" };
-        const BATCH_SIZE = 20; // Must match Arduino
+        
+        // CRITICAL: MUST MATCH ARDUINO BATCH_SIZE EXACTLY
+        const BATCH_SIZE = 20; 
         
         let devices = {}; 
         let isRecording = false;
-        let rawPackets = []; // Stores raw bytes instantly, zero math here!
+        let recordedData = []; 
+        let recordingStartJs = 0;
+        let recordingStartMcu = 0;
 
         const logDiv = document.getElementById('log');
         const btnPair = document.getElementById('btnPair');
@@ -55,7 +67,10 @@
         const btnDownload = document.getElementById('btnDownload');
         const btnCopy = document.getElementById('btnCopy');
 
-        function log(msg) { logDiv.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}<br>`; logDiv.scrollTop = logDiv.scrollHeight; }
+        function log(msg) { 
+            logDiv.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}<br>`; 
+            logDiv.scrollTop = logDiv.scrollHeight; 
+        }
 
         btnPair.addEventListener('click', async () => {
             try {
@@ -95,17 +110,35 @@
             checkButtons();
         });
 
-        // --- ZERO-LATENCY DATA HANDLING ---
         function handleDataPacket(id, value) {
             if (!isRecording) return;
-            if (value.byteLength < 244) return; 
-            
-            // Instantly copy raw bytes and timestamp. NO MATH.
-            rawPackets.push({
-                id: id,
-                jsTime: Date.now(),
-                buffer: new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
-            });
+            if (value.byteLength < 244) return; // Safety check for 20-sample batch
+
+            const buffer = new DataView(value.buffer, value.byteOffset, value.byteLength);
+            const batchEndMcu = buffer.getUint32(0, true);
+
+            if (recordingStartMcu === 0) {
+                recordingStartJs = Date.now();
+                recordingStartMcu = batchEndMcu - ((BATCH_SIZE - 1) * 5000); 
+            }
+
+            for (let i = 0; i < BATCH_SIZE; i++) {
+                const sampleMcu = batchEndMcu - ((BATCH_SIZE - 1 - i) * 5000);
+                const exactUnixTime = recordingStartJs + ((sampleMcu - recordingStartMcu) / 1000);
+
+                const offset = 4 + (i * 12); 
+
+                // Convert 16-bit integers to physical units
+                const ax = buffer.getInt16(offset, true) * (4.0 / 32768.0) * 9.81;
+                const ay = buffer.getInt16(offset + 2, true) * (4.0 / 32768.0) * 9.81;
+                const az = buffer.getInt16(offset + 4, true) * (4.0 / 32768.0) * 9.81;
+                
+                const gx = buffer.getInt16(offset + 6, true) * (500.0 / 32768.0);
+                const gy = buffer.getInt16(offset + 8, true) * (500.0 / 32768.0);
+                const gz = buffer.getInt16(offset + 10, true) * (500.0 / 32768.0);
+
+                recordedData.push({ t: exactUnixTime, id, ax, ay, az, gx, gy, gz });
+            }
         }
 
         async function sendCommand(cmd) {
@@ -117,7 +150,8 @@
 
         btnStart.addEventListener('click', async () => {
             isRecording = true;
-            rawPackets = [];
+            recordedData = [];
+            recordingStartMcu = 0; 
             log(`🔴 Recording Started with ${Object.keys(devices).length} sensor(s)...`);
             await sendCommand(1);
             checkButtons();
@@ -131,14 +165,14 @@
         });
 
         btnReset.addEventListener('click', () => {
-            rawPackets = [];
+            recordedData = [];
             log("🗑️ Data reset.");
             checkButtons();
         });
 
         function checkButtons() {
             const count = Object.keys(devices).length;
-            const hasData = rawPackets.length > 0;
+            const hasData = recordedData.length > 0;
             btnStart.disabled = (count === 0) || isRecording;
             btnStop.disabled = !isRecording;
             btnDownload.disabled = !hasData;
@@ -146,64 +180,19 @@
             btnPair.disabled = isRecording;
         }
 
-        // --- HEAVY MATH DEFERRED TO DOWNLOAD TIME ---
         function generateCSV() {
-            if (rawPackets.length === 0) return "";
-            
             const rows = ["Timestamp_Unix_MS,Sensor_ID,Acc_X_ms2,Acc_Y_ms2,Acc_Z_ms2,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps"];
+            recordedData.sort((a, b) => a.t - b.t);
             
-            // 1. Find the absolute earliest MCU time to establish a global baseline
-            let baselineJs = 0;
-            let baselineMcu = 0;
-            
-            for (let p of rawPackets) {
-                const view = new DataView(p.buffer.buffer, p.buffer.byteOffset, p.buffer.byteLength);
-                const batchEndMcu = view.getUint32(0, true);
-                const firstSampleMcu = batchEndMcu - ((BATCH_SIZE - 1) * 5000);
-                
-                if (baselineJs === 0 || firstSampleMcu < baselineMcu) {
-                    baselineMcu = firstSampleMcu;
-                    baselineJs = p.jsTime;
-                }
-            }
-            
-            // 2. Parse all packets and calculate physical units
-            let parsedData = [];
-            
-            for (let p of rawPackets) {
-                const view = new DataView(p.buffer.buffer, p.buffer.byteOffset, p.buffer.byteLength);
-                const batchEndMcu = view.getUint32(0, true);
-                
-                for (let i = 0; i < BATCH_SIZE; i++) {
-                    const sampleMcu = batchEndMcu - ((BATCH_SIZE - 1 - i) * 5000);
-                    const exactUnixTime = baselineJs + ((sampleMcu - baselineMcu) / 1000);
-                    
-                    const offset = 4 + (i * 12);
-                    
-                    const ax = view.getInt16(offset, true) * (4.0 / 32768.0) * 9.81;
-                    const ay = view.getInt16(offset + 2, true) * (4.0 / 32768.0) * 9.81;
-                    const az = view.getInt16(offset + 4, true) * (4.0 / 32768.0) * 9.81;
-                    
-                    const gx = view.getInt16(offset + 6, true) * (500.0 / 32768.0);
-                    const gy = view.getInt16(offset + 8, true) * (500.0 / 32768.0);
-                    const gz = view.getInt16(offset + 10, true) * (500.0 / 32768.0);
-                    
-                    parsedData.push({ t: exactUnixTime, id: p.id, ax, ay, az, gx, gy, gz });
-                }
-            }
-            
-            // 3. Sort chronologically and format
-            parsedData.sort((a, b) => a.t - b.t);
-            
-            for (let r of parsedData) {
+            for (let i = 0; i < recordedData.length; i++) {
+                const r = recordedData[i];
                 rows.push(`${r.t.toFixed(3)},${r.id},${r.ax.toFixed(4)},${r.ay.toFixed(4)},${r.az.toFixed(4)},${r.gx.toFixed(4)},${r.gy.toFixed(4)},${r.gz.toFixed(4)}`);
             }
-            
             return rows.join('\n');
         }
 
         btnDownload.addEventListener('click', () => {
-            log("🔄 Processing raw data into CSV...");
+            log("🔄 Generating CSV...");
             const csvContent = generateCSV();
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
             
@@ -213,22 +202,23 @@
             
             if (typeof saveAs !== 'undefined') {
                 saveAs(blob, filename);
+                log(`💾 Downloaded: ${filename} (${recordedData.length} samples).`);
             } else {
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement("a");
                 link.href = url; link.download = filename;
                 document.body.appendChild(link); link.click(); document.body.removeChild(link);
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
+                log(`💾 Downloaded (fallback): ${filename}`);
             }
-            log(`💾 Downloaded: ${filename} (${rawPackets.length * BATCH_SIZE} samples).`);
         });
 
         btnCopy.addEventListener('click', async () => {
-            log("🔄 Processing raw data for clipboard...");
+            log("🔄 Copying to clipboard...");
             const csvContent = generateCSV();
             try {
                 await navigator.clipboard.writeText(csvContent);
-                log(`📋 Copied ${rawPackets.length * BATCH_SIZE} rows to clipboard!`);
+                log(`📋 Copied ${recordedData.length} rows to clipboard!`);
             } catch (err) {
                 log("❌ Failed to copy. Check browser permissions.");
             }
