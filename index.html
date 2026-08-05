@@ -1,336 +1,238 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BCMCH Gait IMU Recorder</title>
-<style>
-  :root {
-    --bg: #0f172a; --panel: #1e293b; --text: #e2e8f0;
-    --accent: #38bdf8; --ok: #22c55e; --warn: #f59e0b; --err: #ef4444;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; font-family: system-ui, -apple-system, sans-serif;
-    background: var(--bg); color: var(--text); line-height: 1.5;
-  }
-  .container { max-width: 900px; margin: 0 auto; padding: 1.5rem; }
-  h1 { margin: 0 0 0.5rem; font-size: 1.4rem; }
-  .subtitle { color: #94a3b8; font-size: 0.9rem; margin-bottom: 1.2rem; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.8rem; margin-bottom: 1.2rem; }
-  .card {
-    background: var(--panel); border-radius: 0.6rem; padding: 1rem;
-    text-align: center; border: 1px solid #334155;
-  }
-  .card .value { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
-  .card .label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
-  .card.warn .value { color: var(--warn); }
-  .card.err  .value { color: var(--err); }
-  .card.ok   .value { color: var(--ok); }
-  .btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    gap: 0.4rem; padding: 0.6rem 1.2rem; border: none; border-radius: 0.4rem;
-    font-size: 0.95rem; font-weight: 600; cursor: pointer; color: #fff;
-    transition: opacity 0.15s;
-  }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .btn-primary { background: var(--accent); color: #0f172a; }
-  .btn-success { background: var(--ok); }
-  .btn-danger  { background: var(--err); }
-  .btn-secondary { background: #475569; }
-  .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
-  .log {
-    background: #020617; border: 1px solid #1e293b; border-radius: 0.5rem;
-    padding: 0.8rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.78rem; max-height: 240px; overflow-y: auto; white-space: pre-wrap;
-    color: #cbd5e1; line-height: 1.4;
-  }
-  .log .ts { color: #64748b; }
-  .log .ok { color: var(--ok); }
-  .log .warn { color: var(--warn); }
-  .log .err { color: var(--err); }
-  .hidden { display: none !important; }
-  .status-dot {
-    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
-    background: var(--err); margin-right: 0.4rem;
-  }
-  .status-dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .status-dot.busy { background: var(--warn); }
-  .hint { font-size: 0.8rem; color: #64748b; margin-top: 0.4rem; }
-</style>
-<base target="_blank">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gait Analysis Streamer (Zero-Loss)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <style>
+        body { font-family: sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; background: #f4f4f9; }
+        .controls { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
+        button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .btn-pair { background: #007bff; color: white; } .btn-start { background: #28a745; color: white; }
+        .btn-stop { background: #dc3545; color: white; } .btn-reset { background: #ffc107; color: black; }
+        .btn-dl { background: #6c757d; color: white; } .btn-copy { background: #17a2b8; color: white; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .status-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .sensor-card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-left: 5px solid #ccc; }
+        .sensor-card.active { border-left-color: #28a745; background: #f8fff8; }
+        #log { background: #222; color: #0f0; padding: 10px; border-radius: 5px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9em; }
+    </style>
 </head>
 <body>
-<div class="container">
-  <h1>🦿 BCMCH Gait IMU Recorder</h1>
-  <div class="subtitle">Web Bluetooth receiver for Xiao nRF52840 Sense (LSM6DS3)</div>
+    <h1>Gait Metrics Streamer (Zero-Loss)</h1>
+    <div class="controls">
+        <button id="btnPair" class="btn-pair">1. Pair Sensor(s)</button>
+        <button id="btnStart" class="btn-start" disabled>2. Start Recording</button>
+        <button id="btnStop" class="btn-stop" disabled>3. Stop Recording</button>
+        <button id="btnReset" class="btn-reset">4. Reset Data</button>
+        <button id="btnDownload" class="btn-dl" disabled>5. Download CSV</button>
+        <button id="btnCopy" class="btn-copy" disabled>6. Copy to Clipboard</button>
+    </div>
+    <div class="status-panel">
+        <div id="card-1" class="sensor-card"><h3>Right Leg (ID 1)</h3><div id="status-1">Disconnected</div></div>
+        <div id="card-2" class="sensor-card"><h3>Left Leg (ID 2)</h3><div id="status-2">Disconnected</div></div>
+        <div id="card-3" class="sensor-card"><h3>Torso (ID 3)</h3><div id="status-3">Disconnected</div></div>
+    </div>
+    <div id="log"></div>
 
-  <div class="grid">
-    <div class="card" id="card-rate"><div class="value" id="disp-rate">—</div><div class="label">Rate (Hz)</div></div>
-    <div class="card" id="card-samples"><div class="value" id="disp-samples">0</div><div class="label">Samples</div></div>
-    <div class="card" id="card-gaps"><div class="value" id="disp-gaps">0</div><div class="label">Seq Gaps</div></div>
-    <div class="card" id="card-pkts"><div class="value" id="disp-pkts">0</div><div class="label">Packets</div></div>
-    <div class="card"><div class="value" id="disp-buf">0</div><div class="label">Buffer</div></div>
-    <div class="card"><div class="value" id="disp-time">—</div><div class="label">Duration</div></div>
-  </div>
+    <script>
+        const SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+        const DATA_CHAR_UUID = '19b10001-e8f2-537e-4f6c-d104768a1214';
+        const CTRL_CHAR_UUID = '19b10002-e8f2-537e-4f6c-d104768a1214';
+        const LABELS = { 1: "Right Leg", 2: "Left Leg", 3: "Torso" };
+        const BATCH_SIZE = 20; // Must match Arduino
+        
+        let devices = {}; 
+        let isRecording = false;
+        let rawPackets = []; // Stores raw bytes instantly, zero math here!
 
-  <div class="btn-row">
-    <button class="btn btn-primary" id="btn-scan" onclick="scan()">
-      <span class="status-dot" id="status-dot"></span>Scan & Connect
-    </button>
-    <button class="btn btn-success" id="btn-start" onclick="startRec()" disabled>▶ Start</button>
-    <button class="btn btn-danger"  id="btn-stop"  onclick="stopRec()"  disabled>⏹ Stop</button>
-    <button class="btn btn-secondary" id="btn-clear" onclick="clearLog()">Clear Log</button>
-    <button class="btn btn-secondary" id="btn-csv"   onclick="downloadCSV()" disabled>⬇ CSV</button>
-  </div>
+        const logDiv = document.getElementById('log');
+        const btnPair = document.getElementById('btnPair');
+        const btnStart = document.getElementById('btnStart');
+        const btnStop = document.getElementById('btnStop');
+        const btnReset = document.getElementById('btnReset');
+        const btnDownload = document.getElementById('btnDownload');
+        const btnCopy = document.getElementById('btnCopy');
 
-  <div class="log" id="log">Ready. Click "Scan & Connect" to find a BCMCH_GAIT device.</div>
-  <div class="hint">Requires Chrome/Edge on Windows, macOS, Android, or Chromebook with Bluetooth LE.</div>
-</div>
+        function log(msg) { logDiv.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}<br>`; logDiv.scrollTop = logDiv.scrollHeight; }
 
-<script>
-// ---------------------------------------------------------------------------
-// BLE UUIDs (must match Arduino sketch)
-// ---------------------------------------------------------------------------
-const SERVICE_UUID      = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
-const CHAR_TIME_UUID    = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
-const CHAR_CONTROL_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
-const CHAR_DATA_UUID    = 'beb5483e-36e1-4688-b7f5-ea07361b26aa';
+        btnPair.addEventListener('click', async () => {
+            try {
+                log("Scanning... Please select a GaitSense device.");
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'GaitSense_' }],
+                    optionalServices: [SERVICE_UUID]
+                });
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-let device = null;
-let server = null;
-let dataChar = null;
-let controlChar = null;
-let timeChar = null;
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                const charData = await service.getCharacteristic(DATA_CHAR_UUID);
+                const charCtrl = await service.getCharacteristic(CTRL_CHAR_UUID);
 
-let isRecording = false;
-let baseEpochMs = 0;
-let startTimeMs = 0;
-let samples = [];
-let packetCount = 0;
-let lastSeq = null;
-let seqGaps = 0;
-let lastRateTime = 0;
-let rateSamples = 0;
+                const id = parseInt(device.name.split('_')[1]);
+                if (isNaN(id) || id < 1 || id > 3) return;
 
-// LSM6DS3 conversion factors
-const ACCEL_SCALE = 2.0  / 32768.0;   // ±2 g
-const GYRO_SCALE  = 0.00875;          // ±250 dps (8.75 mdps/LSB)
+                devices[id] = { device, charData, charCtrl };
+                document.getElementById(`status-${id}`).innerText = "Connected";
+                document.getElementById(`card-${id}`).classList.add('active');
 
-// ---------------------------------------------------------------------------
-// UI helpers
-// ---------------------------------------------------------------------------
-const $ = id => document.getElementById(id);
-function log(msg, cls='') {
-  const ts = new Date().toLocaleTimeString('en-GB',{hour12:false});
-  const line = `<span class="ts">[${ts}]</span> <span class="${cls}">${msg}</span>`;
-  $('log').innerHTML += '\n' + line;
-  $('log').scrollTop = $('log').scrollHeight;
-}
-function clearLog() { $('log').textContent = ''; }
-function setDot(state) {
-  const d = $('status-dot');
-  d.className = 'status-dot' + (state ? ' ' + state : '');
-}
-function setBtn(id, en) { $(id).disabled = !en; }
+                await charData.startNotifications();
+                charData.addEventListener('characteristicvaluechanged', (event) => handleDataPacket(id, event.target.value));
 
-// ---------------------------------------------------------------------------
-// BLE Scan & Connect
-// ---------------------------------------------------------------------------
-async function scan() {
-  if (!navigator.bluetooth) { log('Web Bluetooth not supported on this browser.', 'err'); return; }
-  try {
-    log('Scanning for BCMCH_GAIT-* ...');
-    device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: 'BCMCH_GAIT' }],
-      optionalServices: [SERVICE_UUID]
-    });
-    log(`Found: ${device.name}`);
-    setDot('busy');
+                device.addEventListener('gattserverdisconnected', () => {
+                    log(`⚠️ ${device.name} disconnected.`);
+                    document.getElementById(`status-${id}`).innerText = "Disconnected";
+                    document.getElementById(`card-${id}`).classList.remove('active');
+                    delete devices[id];
+                    checkButtons();
+                });
 
-    device.addEventListener('gattserverdisconnected', onDisconnect);
-    server = await device.gatt.connect();
-    log('GATT connected.');
+                log(`✅ Connected to ${device.name} (${LABELS[id]})`);
+            } catch (error) {
+                if (error.name !== 'NotFoundError') log(`❌ Pairing failed: ${error}`);
+            }
+            checkButtons();
+        });
 
-    const service = await server.getPrimaryService(SERVICE_UUID);
-    timeChar    = await service.getCharacteristic(CHAR_TIME_UUID);
-    controlChar = await service.getCharacteristic(CHAR_CONTROL_UUID);
-    dataChar    = await service.getCharacteristic(CHAR_DATA_UUID);
+        // --- ZERO-LATENCY DATA HANDLING ---
+        function handleDataPacket(id, value) {
+            if (!isRecording) return;
+            if (value.byteLength < 244) return; 
+            
+            // Instantly copy raw bytes and timestamp. NO MATH.
+            rawPackets.push({
+                id: id,
+                jsTime: Date.now(),
+                buffer: new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
+            });
+        }
 
-    await dataChar.startNotifications();
-    dataChar.addEventListener('characteristicvaluechanged', onData);
+        async function sendCommand(cmd) {
+            const uint8Cmd = new Uint8Array([cmd]);
+            for (let id in devices) {
+                try { await devices[id].charCtrl.writeValue(uint8Cmd); } catch (e) {}
+            }
+        }
 
-    log('Notifications started. Ready to record.', 'ok');
-    setDot('on');
-    setBtn('btn-start', true);
-    setBtn('btn-scan', false);
-  } catch (e) {
-    log('Scan/Connect failed: ' + e.message, 'err');
-    setDot('');
-  }
-}
+        btnStart.addEventListener('click', async () => {
+            isRecording = true;
+            rawPackets = [];
+            log(`🔴 Recording Started with ${Object.keys(devices).length} sensor(s)...`);
+            await sendCommand(1);
+            checkButtons();
+        });
 
-function onDisconnect() {
-  log('Device disconnected.', 'warn');
-  isRecording = false;
-  setDot('');
-  setBtn('btn-scan', true);
-  setBtn('btn-start', false);
-  setBtn('btn-stop', false);
-  setBtn('btn-csv', samples.length > 0);
-  device = null;
-}
+        btnStop.addEventListener('click', async () => {
+            isRecording = false;
+            log("⏹️ Recording Stopped.");
+            await sendCommand(0);
+            checkButtons();
+        });
 
-// ---------------------------------------------------------------------------
-// Control
-// ---------------------------------------------------------------------------
-async function startRec() {
-  if (!controlChar) return;
-  samples = [];
-  packetCount = 0;
-  lastSeq = null;
-  seqGaps = 0;
-  baseEpochMs = Date.now();
-  startTimeMs = performance.now();
+        btnReset.addEventListener('click', () => {
+            rawPackets = [];
+            log("🗑️ Data reset.");
+            checkButtons();
+        });
 
-  // Send epoch time (seconds since Unix epoch, uint32 LE)
-  const epochSec = Math.floor(baseEpochMs / 1000);
-  const buf = new ArrayBuffer(4);
-  const view = new DataView(buf);
-  view.setUint32(0, epochSec, true);
-  await timeChar.writeValue(buf);
-  log(`Time sync: ${epochSec}`);
+        function checkButtons() {
+            const count = Object.keys(devices).length;
+            const hasData = rawPackets.length > 0;
+            btnStart.disabled = (count === 0) || isRecording;
+            btnStop.disabled = !isRecording;
+            btnDownload.disabled = !hasData;
+            btnCopy.disabled = !hasData;
+            btnPair.disabled = isRecording;
+        }
 
-  // Send START command (0x01)
-  await controlChar.writeValue(Uint8Array.of(0x01));
-  isRecording = true;
-  log('=== Recording STARTED ===', 'ok');
-  setBtn('btn-start', false);
-  setBtn('btn-stop', true);
-  setBtn('btn-csv', false);
-}
+        // --- HEAVY MATH DEFERRED TO DOWNLOAD TIME ---
+        function generateCSV() {
+            if (rawPackets.length === 0) return "";
+            
+            const rows = ["Timestamp_Unix_MS,Sensor_ID,Acc_X_ms2,Acc_Y_ms2,Acc_Z_ms2,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps"];
+            
+            // 1. Find the absolute earliest MCU time to establish a global baseline
+            let baselineJs = 0;
+            let baselineMcu = 0;
+            
+            for (let p of rawPackets) {
+                const view = new DataView(p.buffer.buffer, p.buffer.byteOffset, p.buffer.byteLength);
+                const batchEndMcu = view.getUint32(0, true);
+                const firstSampleMcu = batchEndMcu - ((BATCH_SIZE - 1) * 5000);
+                
+                if (baselineJs === 0 || firstSampleMcu < baselineMcu) {
+                    baselineMcu = firstSampleMcu;
+                    baselineJs = p.jsTime;
+                }
+            }
+            
+            // 2. Parse all packets and calculate physical units
+            let parsedData = [];
+            
+            for (let p of rawPackets) {
+                const view = new DataView(p.buffer.buffer, p.buffer.byteOffset, p.buffer.byteLength);
+                const batchEndMcu = view.getUint32(0, true);
+                
+                for (let i = 0; i < BATCH_SIZE; i++) {
+                    const sampleMcu = batchEndMcu - ((BATCH_SIZE - 1 - i) * 5000);
+                    const exactUnixTime = baselineJs + ((sampleMcu - baselineMcu) / 1000);
+                    
+                    const offset = 4 + (i * 12);
+                    
+                    const ax = view.getInt16(offset, true) * (4.0 / 32768.0) * 9.81;
+                    const ay = view.getInt16(offset + 2, true) * (4.0 / 32768.0) * 9.81;
+                    const az = view.getInt16(offset + 4, true) * (4.0 / 32768.0) * 9.81;
+                    
+                    const gx = view.getInt16(offset + 6, true) * (500.0 / 32768.0);
+                    const gy = view.getInt16(offset + 8, true) * (500.0 / 32768.0);
+                    const gz = view.getInt16(offset + 10, true) * (500.0 / 32768.0);
+                    
+                    parsedData.push({ t: exactUnixTime, id: p.id, ax, ay, az, gx, gy, gz });
+                }
+            }
+            
+            // 3. Sort chronologically and format
+            parsedData.sort((a, b) => a.t - b.t);
+            
+            for (let r of parsedData) {
+                rows.push(`${r.t.toFixed(3)},${r.id},${r.ax.toFixed(4)},${r.ay.toFixed(4)},${r.az.toFixed(4)},${r.gx.toFixed(4)},${r.gy.toFixed(4)},${r.gz.toFixed(4)}`);
+            }
+            
+            return rows.join('\n');
+        }
 
-async function stopRec() {
-  if (!controlChar) return;
-  await controlChar.writeValue(Uint8Array.of(0x00));
-  isRecording = false;
-  log('=== Recording STOPPED ===', 'warn');
-  setBtn('btn-start', true);
-  setBtn('btn-stop', false);
-  setBtn('btn-csv', samples.length > 0);
-}
+        btnDownload.addEventListener('click', () => {
+            log("🔄 Processing raw data into CSV...");
+            const csvContent = generateCSV();
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+            
+            const now = new Date();
+            const pad = (n) => n.toString().padStart(2, '0');
+            const filename = `gait_data_${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}.csv`;
+            
+            if (typeof saveAs !== 'undefined') {
+                saveAs(blob, filename);
+            } else {
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url; link.download = filename;
+                document.body.appendChild(link); link.click(); document.body.removeChild(link);
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }
+            log(`💾 Downloaded: ${filename} (${rawPackets.length * BATCH_SIZE} samples).`);
+        });
 
-// ---------------------------------------------------------------------------
-// Data parsing
-// ---------------------------------------------------------------------------
-function onData(event) {
-  const value = event.target.value;
-  const bytes = new Uint8Array(value.buffer);
-  if (bytes.length < 2) return;
-
-  const seq  = bytes[0];
-  const count = bytes[1];
-  const expectedLen = 2 + count * 16;
-  if (bytes.length < expectedLen) {
-    log(`Short packet: got ${bytes.length}, expected ${expectedLen}`, 'warn');
-    return;
-  }
-
-  // Sequence gap detection
-  if (lastSeq !== null) {
-    const expectedSeq = (lastSeq + 1) & 0xFF;
-    if (seq !== expectedSeq) {
-      const missed = (seq - expectedSeq + 256) & 0xFF;
-      seqGaps += missed;
-      log(`Seq gap: expected ${expectedSeq}, got ${seq} (missed ~${missed} packet(s))`, 'warn');
-    }
-  }
-  lastSeq = seq;
-  packetCount++;
-
-  let offset = 2;
-  for (let i = 0; i < count; i++) {
-    const relMs = (bytes[offset]) | (bytes[offset+1] << 8) | (bytes[offset+2] << 16) | (bytes[offset+3] << 24);
-    offset += 4;
-
-    const axRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const ayRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const azRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const gxRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const gyRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-    const gzRaw = (bytes[offset]) | (bytes[offset+1] << 8); offset += 2;
-
-    // Sign-extend 16-bit
-    const sx = v => (v & 0x8000) ? v - 0x10000 : v;
-
-    const tsMs = baseEpochMs + relMs;
-    samples.push({
-      Timestamp_ms: tsMs,
-      Unix_Time: tsMs / 1000.0,
-      Sensor_ID: device ? device.name.replace('BCMCH_GAIT-', '') : 'Unknown',
-      Accel_X_g: sx(axRaw) * ACCEL_SCALE,
-      Accel_Y_g: sx(ayRaw) * ACCEL_SCALE,
-      Accel_Z_g: sx(azRaw) * ACCEL_SCALE,
-      Gyro_X_dps: sx(gxRaw) * GYRO_SCALE,
-      Gyro_Y_dps: sx(gyRaw) * GYRO_SCALE,
-      Gyro_Z_dps: sx(gzRaw) * GYRO_SCALE,
-    });
-  }
-
-  // Rate estimation (last 1 second)
-  rateSamples += count;
-  const now = performance.now();
-  if (now - lastRateTime >= 1000) {
-    const hz = Math.round((rateSamples * 1000) / (now - lastRateTime));
-    $('disp-rate').textContent = hz;
-    if (hz >= 190) $('card-rate').className = 'card ok';
-    else if (hz >= 150) $('card-rate').className = 'card warn';
-    else $('card-rate').className = 'card err';
-    rateSamples = 0;
-    lastRateTime = now;
-  }
-
-  // Update UI
-  $('disp-samples').textContent = samples.length.toLocaleString();
-  $('disp-pkts').textContent = packetCount.toLocaleString();
-  $('disp-gaps').textContent = seqGaps;
-  $('disp-buf').textContent = count;
-  if (startTimeMs) {
-    const dur = ((performance.now() - startTimeMs) / 1000).toFixed(1);
-    $('disp-time').textContent = dur + ' s';
-  }
-}
-
-// ---------------------------------------------------------------------------
-// CSV Export (matches uploaded format)
-// ---------------------------------------------------------------------------
-function downloadCSV() {
-  if (samples.length === 0) return;
-  const header = 'Timestamp_ms,Unix_Time,Sensor_ID,Accel_X_g,Accel_Y_g,Accel_Z_g,Gyro_X_dps,Gyro_Y_dps,Gyro_Z_dps';
-  const rows = samples.map(s => [
-    s.Timestamp_ms,
-    s.Unix_Time.toFixed(3),
-    s.Sensor_ID,
-    s.Accel_X_g.toFixed(6),
-    s.Accel_Y_g.toFixed(6),
-    s.Accel_Z_g.toFixed(6),
-    s.Gyro_X_dps.toFixed(4),
-    s.Gyro_Y_dps.toFixed(4),
-    s.Gyro_Z_dps.toFixed(4),
-  ].join(','));
-  const csv = [header, ...rows].join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `imu_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-  log(`Downloaded ${samples.length} rows.`, 'ok');
-}
-</script>
+        btnCopy.addEventListener('click', async () => {
+            log("🔄 Processing raw data for clipboard...");
+            const csvContent = generateCSV();
+            try {
+                await navigator.clipboard.writeText(csvContent);
+                log(`📋 Copied ${rawPackets.length * BATCH_SIZE} rows to clipboard!`);
+            } catch (err) {
+                log("❌ Failed to copy. Check browser permissions.");
+            }
+        });
+    </script>
 </body>
 </html>
