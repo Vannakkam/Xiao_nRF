@@ -1,5 +1,5 @@
 #include <ArduinoBLE.h>
-#include <Arduino_LSM6DS3.H>
+#include <Arduino_LSM6DS3.h>
 
 // BLE Service and Characteristic UUIDs
 BLEService imuService("19B10000-E8F2-537E-4F6C-D104768a1214");
