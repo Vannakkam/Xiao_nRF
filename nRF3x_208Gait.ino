@@ -1,5 +1,5 @@
 /* ============================================================================
- * GaitIMU v13 — 208 Hz FIFO BLE IMU streamer + sample-index loss detection
+ * GaitIMU v13.2 — FIFO acquisition queue + paced BLE notifications + sample-index loss detection
  * Board: Seeed XIAO nRF52840 Sense · Libraries: ArduinoBLE + LSM6DS3 (Seeed)
  *
  * Preserved from v11b (known working baseline):
@@ -120,6 +120,17 @@ uint32_t packetSample0    = 0;
 uint32_t nextSampleIndex  = 0;
 uint32_t packetT0         = 0;
 uint8_t  packetBuf[MAX_PACKET_LEN];
+/* Acquisition and BLE transmission are decoupled. FIFO draining only enqueues
+   complete sample packets; the main loop sends at most one notification per
+   iteration after BLE.poll(). 64 packets ~= 1.23 s at 208 Hz / 4 samples. */
+#define TX_QUEUE_PACKETS 64
+struct TxPacket { uint16_t len; uint8_t data[MAX_PACKET_LEN]; };
+static TxPacket txQueue[TX_QUEUE_PACKETS];
+static uint8_t txHead = 0, txTail = 0, txCount = 0;
+static uint32_t txQueueDropPackets = 0;
+static uint32_t lastTxMillis = 0;
+static uint32_t nextSampleRelUs = 0;
+static bool sampleTimeInitialized = false;
 uint32_t statLast = 0, pktCount = 0, smpCount = 0, i2cErrors = 0;
 uint32_t fifoOverruns = 0, estimatedLostSamples = 0;
 uint16_t fifoWordsBuf[6];
@@ -232,8 +243,9 @@ static bool fifoPattern(uint16_t* patternOut) {
   *patternOut = (uint16_t)lo | ((uint16_t)(hi & 0x03) << 8);
   return true;
 }
-/* Read sequential 16-bit FIFO words. LSM6DS3 FIFO_DATA_OUT supports a
-   multi-byte read; IF_INC is enabled. Returns actual words obtained. */
+/* Read sequential 16-bit FIFO words. Keep each I2C request <=24 bytes
+   (12 words) to stay safely inside the nRF52 Wire receive buffer.
+   Returns actual words obtained; caller drains in bounded chunks. */
 static uint8_t readFifoWords(uint16_t* dst, uint8_t maxWords) {
   const uint8_t bytesWanted = (uint8_t)(maxWords * 2);
   bus->beginTransmission(IMU_ADDR);
@@ -358,12 +370,44 @@ static void flushPacket() {
   packetBuf[2] = (uint8_t)((packetSample0 >> 8) & 0xFF);
   packetBuf[3] = (uint8_t)((packetSample0 >> 16) & 0xFF);
   memcpy(&packetBuf[4], &packetT0, 4);
-  const int len = PACKET_HEADER_LEN + 12 * packetFill;
-  if (!dataChar.writeValue(packetBuf, len)) txErrors++;
+  const uint16_t len = (uint16_t)(PACKET_HEADER_LEN + 12 * packetFill);
+  if (txCount < TX_QUEUE_PACKETS) {
+    TxPacket &q = txQueue[txTail];
+    q.len = len;
+    memcpy(q.data, packetBuf, len);
+    txTail = (uint8_t)((txTail + 1) % TX_QUEUE_PACKETS);
+    txCount++;
+  } else {
+    /* Preserve queue order; the next transmitted sample index exposes this
+       loss to the browser. Never block FIFO acquisition waiting for BLE. */
+    txQueueDropPackets++;
+    Serial.print("[BLEQ] queue full; dropped packet samples=");
+    Serial.println(packetFill);
+  }
   packetFill = 0;
   pktCount++;
 }
-static void addSample(uint32_t sampleRelUs, int16_t acc[3], int16_t gyr[3]) {
+static void sendOneQueuedPacket(bool force = false) {
+  if (txCount == 0) return;
+  const uint32_t now = millis();
+  /* 15 ms pacing is ~66 notifications/s, safely above 52/s at 208 Hz / 4,
+     while giving ArduinoBLE time to service each notification. */
+  if (!force && (uint32_t)(now - lastTxMillis) < 15) return;
+  TxPacket &q = txQueue[txHead];
+  if (!dataChar.writeValue(q.data, q.len)) txErrors++;
+  txHead = (uint8_t)((txHead + 1) % TX_QUEUE_PACKETS);
+  txCount--;
+  lastTxMillis = now;
+}
+static void addSample(uint32_t /*fifoEstimatedRelUs*/, int16_t acc[3], int16_t gyr[3]) {
+  /* Timestamp samples on a monotonic nominal 208-Hz sample clock. FIFO drain
+     latency must not create duplicate/backward timestamps across batches. */
+  if (!sampleTimeInitialized) {
+    nextSampleRelUs = (uint32_t)(micros() - syncMicros);
+    sampleTimeInitialized = true;
+  }
+  const uint32_t sampleRelUs = nextSampleRelUs;
+  nextSampleRelUs += SAMPLE_PERIOD_US;
   if (packetFill == 0) {
     packetSample0 = nextSampleIndex;
     packetT0 = sampleRelUs;
@@ -373,7 +417,7 @@ static void addSample(uint32_t sampleRelUs, int16_t acc[3], int16_t gyr[3]) {
   memcpy(p + 6, gyr, 6);
   packetFill++;
   smpCount++;
-  nextSampleIndex = (nextSampleIndex + 1) & 0xFFFFFFUL; /* 24-bit modular sample index */
+  nextSampleIndex = (nextSampleIndex + 1) & 0xFFFFFFUL;
   if (packetFill >= samplesPerPacket) flushPacket();
 }
 static void consumeFifoWord(uint16_t word, uint32_t sampleRelUs) {
@@ -398,44 +442,56 @@ static void drainFifo() {
   const uint32_t nowUs = micros();
   if (st2 == 0xFF) { i2cErrors++; return; }
   const bool overrun = (st2 & 0x40) != 0;
-  uint16_t patternRaw = 0;
-  if (!fifoPattern(&patternRaw)) { i2cErrors++; return; }
-  const uint8_t pattern = (uint8_t)(patternRaw % 6);
 
-  if (!fifoPhaseKnown) {
-    fifoPhase = pattern;
-    fifoPhaseKnown = true;
-    if (fifoPhase != 0) fifoWordFill = 0; /* discard to next complete Gx */
-  }
+  /* FIFO_OVR is a latched condition. Do not count it on every loop pass.
+     Reset FIFO to bypass, which clears the latch and discards ambiguous data,
+     then restart continuous mode. Advance sample index once by an elapsed-time
+     estimate so the browser reports a single gap rather than repeated fake gaps. */
   if (overrun) {
     fifoOverruns++;
     timingGaps++;
-    flushPacket();                 /* keep sample-index gaps packet-visible */
-    const uint8_t partialBeforeOverrun = fifoWordFill;
-    fifoWordFill = 0;
-    fifoPhase = pattern;
-    fifoPhaseKnown = true; /* known phase; skip forward until next Gx if needed */
+    flushPacket();
     const uint32_t elapsed = lastFifoDrainUs ? (uint32_t)(nowUs - lastFifoDrainUs) : 0;
-    const uint32_t expected = (elapsed * SAMPLE_RATE_HZ + 500000UL) / 1000000UL;
-    const uint32_t availablePairs = (words + partialBeforeOverrun) / 6;
-    uint32_t missing = (expected > availablePairs) ? expected - availablePairs : 1;
+    uint32_t missing = (elapsed * SAMPLE_RATE_HZ + 500000UL) / 1000000UL;
+    if (missing == 0) missing = 1;
     estimatedLostSamples += missing;
     nextSampleIndex = (nextSampleIndex + missing) & 0xFFFFFFUL;
-    Serial.print("[FIFO] OVERRUN; estimated lost samples="); Serial.println(missing);
+    if (sampleTimeInitialized) nextSampleRelUs += missing * SAMPLE_PERIOD_US;
+    Serial.print("[FIFO] OVERRUN; reset FIFO; estimated lost samples=");
+    Serial.println(missing);
+
+    fifoConfigure(false);   /* bypass clears FIFO and overrun status */
+    fifoWordFill = 0;
+    fifoPhase = 0;
+    fifoPhaseKnown = false;
+    fifoConfigure(true);
+    lastFifoDrainUs = micros();
+    return;
+  }
+
+  uint16_t patternRaw = 0;
+  if (!fifoPattern(&patternRaw)) { i2cErrors++; return; }
+  const uint8_t pattern = (uint8_t)(patternRaw % 6);
+  if (!fifoPhaseKnown) {
+    fifoPhase = pattern;
+    fifoPhaseKnown = true;
+    if (fifoPhase != 0) fifoWordFill = 0; /* align to next complete Gx */
   }
 
   bool drainedAny = false;
   uint32_t sampleOrdinal = 0;
   const uint32_t pairsInSnapshot = (uint32_t)((words + fifoWordFill) / 6);
-  const uint32_t approximateBatchStart = nowUs - ((pairsInSnapshot > 0 ? pairsInSnapshot - 1 : 0) * SAMPLE_PERIOD_US);
-  uint16_t temp[48];
+  const uint32_t approximateBatchStart = nowUs -
+      ((pairsInSnapshot > 0 ? pairsInSnapshot - 1 : 0) * SAMPLE_PERIOD_US);
+  uint16_t temp[12]; /* 12 words = 24 bytes, safely below Wire's 32-byte buffer */
   while (words > 0) {
-    uint8_t ask = (words > 48) ? 48 : (uint8_t)words;
+    uint8_t ask = (words > 12) ? 12 : (uint8_t)words;
     uint8_t got = readFifoWords(temp, ask);
     if (got == 0) {
       i2cErrors++;
       flushPacket();
-      fifoWordFill = 0; fifoPhaseKnown = false;
+      fifoWordFill = 0;
+      fifoPhaseKnown = false;
       break;
     }
     drainedAny = true;
@@ -458,7 +514,7 @@ void setup() {
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 2500) {}
   Serial.println();
-  Serial.println("GaitIMU v13 FIFO node: " DEVICE_NAME);
+  Serial.println("GaitIMU v13.2 FIFO node: " DEVICE_NAME);
 
 #ifdef LED_BUILTIN
   pinMode(LED_BUILTIN, OUTPUT);
@@ -546,8 +602,13 @@ void loop() {
       case CMD_START:
         if (!streaming) {
           packetFill = 0;
+          txHead = txTail = txCount = 0;
+          txQueueDropPackets = 0;
           nextSampleIndex = 0; fifoWordFill = 0; fifoPhaseKnown = false;
+          sampleTimeInitialized = false;
           lastFifoDrainUs = micros();
+          lastTxMillis = millis();
+          fifoConfigure(false); /* discard pre-start FIFO contents */
           timingGaps = txErrors = i2cErrors = pktCount = smpCount = 0;
           fifoOverruns = estimatedLostSamples = 0;
           statLast = millis();
@@ -562,6 +623,7 @@ void loop() {
           drainFifo();
           flushPacket();
           fifoConfigure(false);
+          while (txCount > 0) { sendOneQueuedPacket(true); BLE.poll(); }
           Serial.println("[CMD] streaming stopped");
         }
         break;
@@ -584,6 +646,8 @@ void loop() {
 
   /* Drain sensor FIFO; sensor samples continue at 208 Hz while BLE is serviced. */
   drainFifo();
+  sendOneQueuedPacket();
+  BLE.poll(); /* service notification transmission between acquisition passes */
 
 #ifdef LED_BUILTIN
   static uint32_t lastBlink = 0;
@@ -602,7 +666,9 @@ void loop() {
       Serial.print(" timingGaps=");    Serial.print(timingGaps);
       Serial.print(" txErrors=");      Serial.print(txErrors);
       Serial.print(" fifoOverruns="); Serial.print(fifoOverruns);
-      Serial.print(" estimatedLostSamples="); Serial.println(estimatedLostSamples);
+      Serial.print(" estimatedLostSamples="); Serial.print(estimatedLostSamples);
+      Serial.print(" txQueueDepth="); Serial.print(txCount);
+      Serial.print(" txQueueDropPackets="); Serial.println(txQueueDropPackets);
     }
   }
   /* No fixed 1 ms delay: keep polling status between BLE service calls. */
