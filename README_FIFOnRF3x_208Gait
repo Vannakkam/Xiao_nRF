@@ -1,5 +1,5 @@
 Gait IMU recorder v13 — FIFO acquisition + sample-loss detection
-
+Revised with CG on 244/11/26
 Files:
 - nRF_Gait.ino: firmware for Seeed XIAO nRF52840 Sense / LSM6DS3
 - index.html: matching Web Bluetooth dashboard
