@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XIAO nRF52840 Sense — 208 Hz IMU Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --green: #22c55e;
+      --red: #ef4444;
+      --amber: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 20px;
+      line-height: 1.45;
+    }
+    .container { max-width: 980px; margin: 0 auto; }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    h1 { font-size: 1.35rem; margin: 0; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; }
+    .badge {
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      background: #334155;
+      color: #e2e8f0;
+    }
+    .badge.connected { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid #22c55e; }
+    .badge.recording { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
+    .badge.error     { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #f59e0b; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; }
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 11px 16px;
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      color: #fff;
+      transition: opacity 0.15s, transform 0.08s;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-pair     { background: #0284c7; }
+    .btn-start    { background: #16a34a; }
+    .btn-stop     { background: #dc2626; }
+    .btn-download { background: #7c3aed; }
+    .btn-reset    { background: #475569; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+      gap: 12px;
+    }
+    .stat {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .stat-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat-value { font-size: 1.15rem; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
+    canvas {
+      width: 100%;
+      height: 210px;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: block;
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 8px;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }
+    .log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+      color: #cbd5e1;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      height: 130px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+    .warn-box {
+      display: none;
+      background: rgba(245, 158, 11, 0.15);
+      border: 1px solid var(--amber);
+      color: #fde68a;
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 14px;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>XIAO nRF52840 Sense — Gait &amp; Tremor Logger</h1>
+      <div class="subtitle">208 Hz 6-Axis IMU | ±4g &amp; ±500 dps | Binary Packet BLE | µs Epoch Sync</div>
+    </div>
+    <div>
+      <span id="connBadge" class="badge">Disconnected</span>
+      <span id="recBadge" class="badge" style="margin-left:6px;">Idle</span>
+    </div>
+  </header>
+
+  <div id="btWarn" class="warn-box"></div>
+
+  <div class="card">
+    <div class="controls">
+      <button id="btnPair" class="btn-pair">1. Pair with Module</button>
+      <button id="btnStart" class="btn-start" disabled>2. Start Recording</button>
+      <button id="btnStop" class="btn-stop" disabled>3. Stop Recording</button>
+      <button id="btnDownload" class="btn-download" disabled>4. Download .csv</button>
+      <button id="btnReset" class="btn-reset">5. Reset All Data</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="grid">
+      <div class="stat">
+        <div class="stat-label">Samples Collected</div>
+        <div id="stSamples" class="stat-value">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Effective Rate</div>
+        <div id="stRate" class="stat-value">0.0 Hz</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Packets / Dropped</div>
+        <div id="stPackets" class="stat-value">0 / 0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Device Time Sync</div>
+        <div id="stSync" class="stat-value">Not synced</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Accel (g) [X, Y, Z]</div>
+        <div id="stAccel" class="stat-value" style="font-size:0.95rem;">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Gyro (dps) [X, Y, Z]</div>
+        <div id="stGyro" class="stat-value" style="font-size:0.95rem;">—</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="legend">
+      <div>
+        <span><span class="dot" style="background:#38bdf8;"></span>Ax (g)</span> &nbsp;
+        <span><span class="dot" style="background:#4ade80;"></span>Ay (g)</span> &nbsp;
+        <span><span class="dot" style="background:#f87171;"></span>Az (g)</span>
+        <span style="margin-left:12px;color:#64748b;">(Live Accelerometer ±4g window)</span>
+      </div>
+      <div id="stBuffer">MCU Buffer: 0 pkts</div>
+    </div>
+    <canvas id="plotCanvas" width="940" height="210"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="stat-label" style="margin-bottom:6px;">Event Log</div>
+    <div id="logBox" class="log"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const SERVICE_UUID   = "19b10000-e8f2-537e-4f6c-d104768a1214";
+  const CHAR_DATA_UUID = "19b10001-e8f2-537e-4f6c-d104768a1214";
+  const CHAR_TIME_UUID = "19b10002-e8f2-537e-4f6c-d104768a1214";
+  const CHAR_CTRL_UUID = "19b10003-e8f2-537e-4f6c-d104768a1214";
+  const CHAR_STAT_UUID = "19b10004-e8f2-537e-4f6c-d104768a1214";
+
+  const CMD_START = 0x01;
+  const CMD_STOP  = 0x02;
+  const CMD_RESET = 0x03;
+
+  const ACCEL_SCALE_G  = 0.000122;
+  const GYRO_SCALE_DPS = 0.01750;
+
+  const btnPair     = document.getElementById("btnPair");
+  const btnStart    = document.getElementById("btnStart");
+  const btnStop     = document.getElementById("btnStop");
+  const btnDownload = document.getElementById("btnDownload");
+  const btnReset    = document.getElementById("btnReset");
+  const connBadge   = document.getElementById("connBadge");
+  const recBadge    = document.getElementById("recBadge");
+  const btWarn      = document.getElementById("btWarn");
+
+  const stSamples = document.getElementById("stSamples");
+  const stRate    = document.getElementById("stRate");
+  const stPackets = document.getElementById("stPackets");
+  const stSync    = document.getElementById("stSync");
+  const stAccel   = document.getElementById("stAccel");
+  const stGyro    = document.getElementById("stGyro");
+  const stBuffer  = document.getElementById("stBuffer");
+  const logBox    = document.getElementById("logBox");
+  const canvas    = document.getElementById("plotCanvas");
+  const ctx       = canvas.getContext("2d");
+
+  let bleDevice = null;
+  let dataChar = null, timeChar = null, ctrlChar = null, statChar = null;
+  let isConnected = false;
+  let isRecording = false;
+  let imuHasError = false;
+  let lastLoggedState = null;
+
+  let recordedPackets = [];
+  let totalSamples = 0;
+  let totalPackets = 0;
+  let droppedPackets = 0;
+  let expectedSeq = null;
+
+  let rateWindowSamples = 0;
+  let rateWindowStartMs = performance.now();
+  let currentHz = 0;
+
+  const PLOT_LEN = 416;
+  const plotAx = new Float32Array(PLOT_LEN);
+  const plotAy = new Float32Array(PLOT_LEN);
+  const plotAz = new Float32Array(PLOT_LEN);
+  let plotWriteIdx = 0;
+  let latestSample = null;
+  let dirtyPlot = false;
+
+  if (!navigator.bluetooth) {
+    btWarn.style.display = "block";
+    btWarn.textContent = "Web Bluetooth is unavailable here. Use Chrome/Edge on Android or Desktop over HTTPS or http://localhost (not file://).";
+    btnPair.disabled = true;
+  }
+
+  function log(msg) {
+    const ts = new Date().toLocaleTimeString();
+    logBox.textContent += `[${ts}] ${msg}\n`;
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function updateUiButtons() {
+    btnPair.textContent  = isConnected ? "Disconnect" : "1. Pair with Module";
+    btnStart.disabled    = !isConnected || isRecording;
+    btnStop.disabled     = !isConnected || !isRecording;
+    btnDownload.disabled = (totalSamples === 0);
+
+    connBadge.textContent = isConnected ? "Connected" : "Disconnected";
+    connBadge.className   = isConnected ? "badge connected" : "badge";
+
+    if (imuHasError && isConnected) {
+      recBadge.textContent = "IMU Error";
+      recBadge.className   = "badge error";
+    } else {
+      recBadge.textContent = isRecording ? "Recording (208 Hz)" : "Idle";
+      recBadge.className   = isRecording ? "badge recording" : "badge";
+    }
+  }
+
+  function getCurrentEpochUsBigInt() {
+    const nowMs   = performance.timeOrigin + performance.now();
+    const wholeMs = Math.floor(nowMs);
+    const fracUs  = Math.round((nowMs - wholeMs) * 1000);
+    return BigInt(wholeMs) * 1000n + BigInt(fracUs);
+  }
+
+  async function syncDeviceTime() {
+    if (!timeChar) return;
+    const epochUs = getCurrentEpochUsBigInt();
+    const buf = new ArrayBuffer(8);
+    new DataView(buf).setBigUint64(0, epochUs, true);
+    await timeChar.writeValue(buf);
+    stSync.textContent = new Date(Number(epochUs / 1000n)).toLocaleTimeString();
+    log(`Synced system time (${epochUs} µs)`);
+  }
+
+  async function connectOrDisconnect() {
+    if (isConnected && bleDevice && bleDevice.gatt.connected) {
+      bleDevice.gatt.disconnect();
+      return;
+    }
+
+    try {
+      log("Scanning for XIAO-IMU-208Hz...");
+      bleDevice = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [SERVICE_UUID] }, { namePrefix: "XIAO" }],
+        optionalServices: [SERVICE_UUID]
+      });
+
+      bleDevice.addEventListener("gattserverdisconnected", onDisconnected);
+
+      const server  = await bleDevice.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE_UUID);
+
+      dataChar = await service.getCharacteristic(CHAR_DATA_UUID);
+      timeChar = await service.getCharacteristic(CHAR_TIME_UUID);
+      ctrlChar = await service.getCharacteristic(CHAR_CTRL_UUID);
+      statChar = await service.getCharacteristic(CHAR_STAT_UUID);
+
+      await dataChar.startNotifications();
+      dataChar.addEventListener("characteristicvaluechanged", onImuPacket);
+
+      await statChar.startNotifications();
+      statChar.addEventListener("characteristicvaluechanged", onStatusUpdate);
+
+      isConnected = true;
+      lastLoggedState = null;
+      await syncDeviceTime();
+
+      const initStat = await statChar.readValue();
+      parseStatusView(initStat);
+
+      updateUiButtons();
+      log(`Connected to ${bleDevice.name || "XIAO nRF52840"}`);
+    } catch (err) {
+      log(`BLE error: ${err.message}`);
+      isConnected = false;
+      updateUiButtons();
+    }
+  }
+
+  function onDisconnected() {
+    isConnected = false;
+    log("BLE disconnected. MCU will buffer briefly (~11.5 s) if recording.");
+    updateUiButtons();
+  }
+
+  function onImuPacket(event) {
+    const dv = event.target.value;
+    if (dv.byteLength < 14) return;
+
+    const seq          = dv.getUint16(0, true);
+    const count        = dv.getUint8(2);
+    const flags        = dv.getUint8(3);
+    const startEpochUs = dv.getBigUint64(4, true);
+    const dtTenthsUs   = dv.getUint16(12, true);
+
+    const expectedLen = 14 + count * 12;
+    if (dv.byteLength < expectedLen) {
+      log(`Warning: truncated BLE packet (${dv.byteLength} < ${expectedLen} bytes).`);
+      return;
+    }
+
+    if (expectedSeq !== null) {
+      const gap = (seq - expectedSeq) & 0xFFFF;
+      if (gap > 0 && gap < 30000) {
+        droppedPackets += gap;
+        log(`Detected ${gap} dropped packet(s) before seq ${seq}`);
+      }
+    }
+    expectedSeq = (seq + 1) & 0xFFFF;
+
+    const raw = new Int16Array(count * 6);
+    for (let i = 0; i < count; i++) {
+      const off = 14 + i * 12;
+      const ax = dv.getInt16(off,      true);
+      const ay = dv.getInt16(off + 2,  true);
+      const az = dv.getInt16(off + 4,  true);
+      const gx = dv.getInt16(off + 6,  true);
+      const gy = dv.getInt16(off + 8,  true);
+      const gz = dv.getInt16(off + 10, true);
+
+      const base = i * 6;
+      raw[base]     = ax; raw[base + 1] = ay; raw[base + 2] = az;
+      raw[base + 3] = gx; raw[base + 4] = gy; raw[base + 5] = gz;
+
+      plotAx[plotWriteIdx] = ax * ACCEL_SCALE_G;
+      plotAy[plotWriteIdx] = ay * ACCEL_SCALE_G;
+      plotAz[plotWriteIdx] = az * ACCEL_SCALE_G;
+      plotWriteIdx = (plotWriteIdx + 1) % PLOT_LEN;
+
+      if (i === count - 1) latestSample = { ax, ay, az, gx, gy, gz };
+    }
+
+    if (flags & 0x04) log("Note: IMU hardware FIFO overrun occurred.");
+    if (flags & 0x08) log("Note: MCU RAM buffer wrapped during extended disconnect.");
+
+    recordedPackets.push({ seq, flags, startEpochUs, dtTenthsUs, count, raw });
+    totalPackets++;
+    totalSamples += count;
+    rateWindowSamples += count;
+    dirtyPlot = true;
+  }
+
+  function onStatusUpdate(event) {
+    parseStatusView(event.target.value);
+  }
+
+  function parseStatusView(dv) {
+    if (dv.byteLength < 8) return;
+    const state   = dv.getUint8(0);
+    const flags   = dv.getUint8(1);
+    const bufPkts = dv.getUint16(2, true);
+
+    isRecording = (state === 1);
+    imuHasError = (state === 2) || !(flags & 0x02);
+
+    stBuffer.textContent = `MCU Buffer: ${bufPkts} pkts` + (imuHasError ? " (IMU ERR)" : "");
+
+    if (imuHasError) {
+      btWarn.style.display = "block";
+      btWarn.textContent = "IMU Error reported by module: verify Arduino IDE board is 'Seeed XIAO BLE Sense - nRF52840' (Sense variant) and check Serial Monitor (115200 baud).";
+    } else if (navigator.bluetooth) {
+      btWarn.style.display = "none";
+    }
+
+    if (state !== lastLoggedState) {
+      if (state === 2) log("Module status: IMU ERROR (cannot start recording).");
+      else if (state === 1) log("Module status: Recording active (208 Hz).");
+      else if (lastLoggedState === 1) log("Module status: Idle.");
+      lastLoggedState = state;
+    }
+    updateUiButtons();
+  }
+
+  async function sendControl(cmd) {
+    if (!ctrlChar) return;
+    await ctrlChar.writeValue(new Uint8Array([cmd]));
+  }
+
+  btnPair.addEventListener("click", connectOrDisconnect);
+
+  btnStart.addEventListener("click", async () => {
+    try {
+      await syncDeviceTime();
+      rateWindowSamples = 0;
+      rateWindowStartMs = performance.now();
+      await sendControl(CMD_START);
+      log("Start Recording command sent...");
+    } catch (err) {
+      log(`Start failed: ${err.message}`);
+    }
+  });
+
+  btnStop.addEventListener("click", async () => {
+    try {
+      await sendControl(CMD_STOP);
+      log("Stop Recording command sent...");
+    } catch (err) {
+      log(`Stop failed: ${err.message}`);
+    }
+  });
+
+  btnReset.addEventListener("click", async () => {
+    try {
+      if (isConnected && ctrlChar) await sendControl(CMD_RESET);
+    } catch (err) {
+      log(`Device reset warning: ${err.message}`);
+    }
+    recordedPackets = [];
+    totalSamples = 0;
+    totalPackets = 0;
+    droppedPackets = 0;
+    expectedSeq = null;
+    currentHz = 0;
+    rateWindowSamples = 0;
+    plotAx.fill(0); plotAy.fill(0); plotAz.fill(0);
+    latestSample = null;
+    isRecording = false;
+    dirtyPlot = true;
+
+    stSamples.textContent = "0";
+    stRate.textContent    = "0.0 Hz";
+    stPackets.textContent = "0 / 0";
+    stAccel.textContent   = "—";
+    stGyro.textContent    = "—";
+    updateUiButtons();
+    log("All data reset (browser & module).");
+  });
+
+  btnDownload.addEventListener("click", () => {
+    if (recordedPackets.length === 0) return;
+
+    const firstEpochUs = recordedPackets[0].startEpochUs;
+    const chunks = [];
+    let lines = ["epoch_us,iso_utc,dt_s,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,seq,flags\n"];
+
+    for (let p = 0; p < recordedPackets.length; p++) {
+      const pkt = recordedPackets[p];
+      const dtTenths = BigInt(pkt.dtTenthsUs);
+
+      for (let i = 0; i < pkt.count; i++) {
+        const offsetUs = (BigInt(i) * dtTenths + 5n) / 10n;
+        const tsUs = pkt.startEpochUs + offsetUs;
+
+        const msPart = Number(tsUs / 1000n);
+        const usRem  = Number(tsUs % 1000n).toString().padStart(3, "0");
+        const isoMicros = new Date(msPart).toISOString().slice(0, -1) + usRem + "Z";
+        const dtSec = (Number(tsUs - firstEpochUs) / 1e6).toFixed(6);
+
+        const b = i * 6;
+        const ax = (pkt.raw[b]     * ACCEL_SCALE_G).toFixed(5);
+        const ay = (pkt.raw[b + 1] * ACCEL_SCALE_G).toFixed(5);
+        const az = (pkt.raw[b + 2] * ACCEL_SCALE_G).toFixed(5);
+        const gx = (pkt.raw[b + 3] * GYRO_SCALE_DPS).toFixed(4);
+        const gy = (pkt.raw[b + 4] * GYRO_SCALE_DPS).toFixed(4);
+        const gz = (pkt.raw[b + 5] * GYRO_SCALE_DPS).toFixed(4);
+
+        lines.push(`${tsUs},${isoMicros},${dtSec},${ax},${ay},${az},${gx},${gy},${gz},${pkt.seq},${pkt.flags}\n`);
+      }
+
+      if (lines.length >= 5000) {
+        chunks.push(lines.join(""));
+        lines = [];
+      }
+    }
+    if (lines.length > 0) chunks.push(lines.join(""));
+
+    const blob = new Blob(chunks, { type: "text/csv;charset=utf-8;" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `imu_208hz_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    log(`Downloaded CSV (${totalSamples} samples).`);
+  });
+
+  function drawPlot() {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.strokeStyle = "#1e293b";
+    ctx.lineWidth = 1;
+    for (const frac of [0.25, 0.5, 0.75]) {
+      ctx.beginPath();
+      ctx.moveTo(0, h * frac);
+      ctx.lineTo(w, h * frac);
+      ctx.stroke();
+    }
+
+    const series = [
+      { buf: plotAx, color: "#38bdf8" },
+      { buf: plotAy, color: "#4ade80" },
+      { buf: plotAz, color: "#f87171" }
+    ];
+
+    for (const s of series) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let i = 0; i < PLOT_LEN; i++) {
+        const idx = (plotWriteIdx + i) % PLOT_LEN;
+        const val = Math.max(-4, Math.min(4, s.buf[idx]));
+        const x = (i / (PLOT_LEN - 1)) * w;
+        const y = h * 0.5 - (val / 4) * (h * 0.45);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+  }
+
+  function uiLoop() {
+    const now = performance.now();
+    const elapsedMs = now - rateWindowStartMs;
+    if (elapsedMs >= 1000) {
+      currentHz = (rateWindowSamples * 1000) / elapsedMs;
+      rateWindowSamples = 0;
+      rateWindowStartMs = now;
+    }
+
+    if (dirtyPlot) {
+      stSamples.textContent = totalSamples.toLocaleString();
+      stRate.textContent    = `${currentHz.toFixed(1)} Hz`;
+      stPackets.textContent = `${totalPackets} / ${droppedPackets}`;
+      btnDownload.disabled  = (totalSamples === 0);
+
+      if (latestSample) {
+        stAccel.textContent =
+          `${(latestSample.ax * ACCEL_SCALE_G).toFixed(3)}, ` +
+          `${(latestSample.ay * ACCEL_SCALE_G).toFixed(3)}, ` +
+          `${(latestSample.az * ACCEL_SCALE_G).toFixed(3)}`;
+        stGyro.textContent =
+          `${(latestSample.gx * GYRO_SCALE_DPS).toFixed(2)}, ` +
+          `${(latestSample.gy * GYRO_SCALE_DPS).toFixed(2)}, ` +
+          `${(latestSample.gz * GYRO_SCALE_DPS).toFixed(2)}`;
+      }
+      drawPlot();
+      dirtyPlot = false;
+    }
+    requestAnimationFrame(uiLoop);
+  }
+  drawPlot();
+  requestAnimationFrame(uiLoop);
+})();
+</script>
+</body>
+</html>
